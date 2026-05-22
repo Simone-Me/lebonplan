@@ -36,4 +36,6 @@ desktop.ini
 # Logs
 *.log
 
-/data3
+/data
+
+mcp.json
