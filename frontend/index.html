@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Urban Data Explorer — Paris</title>
+  <link href="https://unpkg.com/maplibre-gl@4/dist/maplibre-gl.css" rel="stylesheet" />
+  <link rel="stylesheet" href="/src/style.css" />
+</head>
+<body>
+  <header class="app-header">
+    <div class="header-left">
+      <span class="logo">UD</span>
+      <h1>Urban Data Explorer</h1>
+    </div>
+    <div class="header-controls">
+      <label for="indicateur-select">Indicateur</label>
+      <select id="indicateur-select">
+        <option value="score_global">Score global</option>
+        <option value="score_qualite_vie">Qualité de vie</option>
+        <option value="score_transports">Transports</option>
+        <option value="score_loisirs">Loisirs</option>
+        <option value="score_services">Services publics</option>
+        <option value="prix_m2_median">Prix m² médian</option>
+        <option value="pct_logements_sociaux">% Logements sociaux</option>
+      </select>
+
+      <label for="annee-slider">Année : <span id="annee-label">2024</span></label>
+      <input type="range" id="annee-slider" min="2014" max="2024" value="2024" step="1" />
+
+      <button id="compare-btn" class="btn-secondary">Comparer 2 arrondissements</button>
+    </div>
+  </header>
+
+  <main class="app-body">
+    <div id="map"></div>
+
+    <!-- Sidebar KPIs -->
+    <aside id="sidebar" class="sidebar hidden">
+      <button id="sidebar-close" aria-label="Fermer">✕</button>
+      <div id="sidebar-content"></div>
+    </aside>
+
+    <!-- Geocodage BAN -->
+    <div id="geocode-box">
+      <input id="geocode-input" type="text" placeholder="Chercher une adresse à Paris…" autocomplete="off" />
+      <div id="geocode-results" class="autocomplete-list hidden"></div>
+    </div>
+
+    <!-- Mode comparaison -->
+    <div id="compare-panel" class="compare-panel hidden">
+      <button id="compare-close" class="btn-icon">✕</button>
+      <h2>Comparer</h2>
+      <div class="compare-selects">
+        <select id="compare-arr1"></select>
+        <span>vs</span>
+        <select id="compare-arr2"></select>
+        <button id="compare-go" class="btn-primary">Comparer</button>
+      </div>
+      <div id="compare-radar-container">
+        <canvas id="compare-radar"></canvas>
+      </div>
+      <div id="compare-table"></div>
+    </div>
+  </main>
+
+  <!-- Légende -->
+  <div id="legend" class="legend">
+    <div class="legend-title" id="legend-title">Score global</div>
+    <div class="legend-scale">
+      <span class="legend-min">0</span>
+      <div class="legend-gradient" id="legend-gradient"></div>
+      <span class="legend-max">100</span>
+    </div>
+  </div>
+
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>
