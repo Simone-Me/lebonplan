@@ -1,6 +1,50 @@
+<<<<<<< HEAD
 data/
 datasrc/
 mcp.json
 __pycache__/
 *.pyc
 .env
+=======
+# Environnement virtuel
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# Données sensibles / volumineuses
+sources/
+*.csv
+*.parquet
+*.xlsx
+*.xls
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+
+# Logs
+*.log
+
+/data
+
+mcp.json
+>>>>>>> c27f1b4ace9841fe7be748d63a7ad727607cb73e
