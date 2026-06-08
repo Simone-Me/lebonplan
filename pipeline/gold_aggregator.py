@@ -207,15 +207,39 @@ def agg_services(db) -> dict:
     return result
 
 
-def agg_immobilier(db) -> dict:
-    """Logements sociaux par arrondissement."""
+def agg_immobilier(db, annee: int) -> dict:
+    """Prix m² médian (DVF+) + logements sociaux par arrondissement."""
     ls = count_by_arr(db["silver_logements_sociaux"])
+
+    # Prix m² médian depuis silver_dvf pour l'année demandée
+    prix_m2 = {}
+    for doc in db["silver_dvf"].find({"annee": annee, "arrondissement": {"$in": ARRONDISSEMENTS}}):
+        arr = doc.get("arrondissement")
+        val = doc.get("prix_m2_median")
+        if arr and val is not None:
+            prix_m2[arr] = float(val)
+
+    # Fallback : année la plus récente disponible si l'année demandée n'existe pas
+    if not prix_m2:
+        latest = db["silver_dvf"].find_one(
+            {"arrondissement": {"$in": ARRONDISSEMENTS}, "prix_m2_median": {"$exists": True}},
+            sort=[("annee", -1)],
+        )
+        if latest:
+            for doc in db["silver_dvf"].find(
+                {"annee": latest["annee"], "arrondissement": {"$in": ARRONDISSEMENTS}}
+            ):
+                arr = doc.get("arrondissement")
+                val = doc.get("prix_m2_median")
+                if arr and val is not None:
+                    prix_m2[arr] = float(val)
+
     result = {}
     for arr in ARRONDISSEMENTS:
         result[arr] = {
-            "nb_logements_sociaux": safe_get(ls, arr),
-            "pct_logements_sociaux": None,  # calculé si données DVF disponibles
-            "prix_m2_median": None,
+            "nb_logements_sociaux":  safe_get(ls, arr),
+            "pct_logements_sociaux": None,
+            "prix_m2_median":        prix_m2.get(arr),
         }
     return result
 
@@ -365,8 +389,8 @@ def run(annee: int | None = None):
     log.info("\n[5/6] Agrégation services publics")
     sv = agg_services(db)
 
-    log.info("\n[6/6] Agrégation immobilier")
-    im = agg_immobilier(db)
+    log.info("\n[6/6] Agrégation immobilier (DVF+ prix m²)")
+    im = agg_immobilier(db, annee)
 
     # Fusion + score global
     kpis_by_arr = {}

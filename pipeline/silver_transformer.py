@@ -215,6 +215,28 @@ def transform_passthrough(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def transform_dvf(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    DVF+ Etalab : extrait prix médian m², arrondissement et année.
+    Colonnes clés : annee, code_insee, prix_m2_median (ou med_prix_m2_ventes)
+    """
+    # Normalise le nom de colonne prix selon la version de l'API
+    for col in ["med_prix_m2_ventes", "prix_m2_median", "med_prixm2_ventes"]:
+        if col in df.columns:
+            df = df.rename(columns={col: "prix_m2_median"})
+            break
+
+    if "code_insee" in df.columns:
+        df["arrondissement"] = df["code_insee"].apply(parse_arrondissement)
+
+    keep = [
+        "annee", "code_insee", "arrondissement", "prix_m2_median",
+        "nbtrans_cod111", "nbtrans_cod121",  # nb transactions maisons/apparts si dispo
+        "_ingested_at", "_dataset_id", "_indicateur", "_signe", "_source",
+    ]
+    return df[[c for c in keep if c in df.columns]]
+
+
 # ─── Dataset registry ─────────────────────────────────────────────────────────
 # (collection_mongo, transformer, colonne_id_pour_upsert, indicateur)
 
@@ -251,6 +273,7 @@ SILVER_CONFIG = {
     "bureaux_poste":                 ("silver_bureaux_poste",      transform_idf_geo,       None,            "services_publics"),
     # Immobilier
     "logements_sociaux":             ("silver_logements_sociaux",  transform_api_geo,       None,            "immobilier"),
+    "dvf_prix_m2":                   ("silver_dvf",                transform_dvf,           None,            "immobilier"),
 }
 
 # ─── Source map (dataset_id → source) ─────────────────────────────────────────
@@ -283,6 +306,7 @@ SOURCE_MAP = {
     "enseignement_superieur":        "idf_opendata",
     "bureaux_poste":                 "idf_opendata",
     "logements_sociaux":             "paris_opendata",
+    "dvf_prix_m2":                   "etalab",
 }
 
 # ─── MinIO reader ─────────────────────────────────────────────────────────────

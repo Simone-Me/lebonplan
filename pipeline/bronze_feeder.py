@@ -337,6 +337,15 @@ DATASETS = [
         "api_max_records": 5000,
         "format_source": "api_opendata",
     },
+    {
+        "id": "dvf_prix_m2",
+        "label": "Prix immobilier médian — DVF+ Etalab (Paris par année)",
+        "indicateur": "immobilier",
+        "signe": "positif",
+        "source": "etalab",
+        "format_source": "api_dvf",
+        # L'API DVF+ Etalab est appelée via fetch_dvf_etalab()
+    },
 ]
 
 # ─── Loaders ──────────────────────────────────────────────────────────────────
@@ -436,6 +445,39 @@ def fetch_api_generic(dataset: dict) -> pd.DataFrame:
 
     df = pd.json_normalize(records)
     log.info(f"    → {len(df)} / {total} lignes récupérées")
+    return df
+
+
+def fetch_dvf_etalab() -> pd.DataFrame:
+    """
+    Récupère les prix médians m² DVF+ via l'API Etalab, pour Paris (code INSEE 75056
+    ou arrondissements 75101-75120), toutes les années disponibles.
+    Format : api_dvf (JSON list de mutations agrégées par commune × année)
+    """
+    url = "https://apidf-preprod.cerema.fr/indicateurs/dv3f/communes/annuel/"
+    # Codes INSEE des 20 arrondissements parisiens
+    codes = [f"751{str(i).zfill(2)}" for i in range(1, 21)]
+    rows = []
+
+    log.info(f"  Fetch DVF+ Etalab (20 arrondissements, toutes années)")
+    for code in codes:
+        try:
+            r = requests.get(url, params={"coddep": "75", "codgeo": code, "ordering": "annee"}, timeout=30)
+            r.raise_for_status()
+            data = r.json()
+            results = data.get("results", data) if isinstance(data, dict) else data
+            for item in results:
+                item["code_insee"] = code
+                rows.append(item)
+        except Exception as e:
+            log.warning(f"    DVF+ erreur pour {code} : {e}")
+
+    if not rows:
+        log.warning("    DVF+ : aucune donnée récupérée")
+        return pd.DataFrame()
+
+    df = pd.json_normalize(rows)
+    log.info(f"    → {len(df)} lignes DVF+ récupérées")
     return df
 
 
@@ -556,6 +598,8 @@ def run():
         try:
             if ds.get("local_file"):
                 df = load_local(ds)
+            elif ds.get("format_source") == "api_dvf":
+                df = fetch_dvf_etalab()
             elif ds.get("format_source") == "api_idf":
                 df = fetch_api_generic(ds)
             else:
