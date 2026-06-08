@@ -450,34 +450,44 @@ def fetch_api_generic(dataset: dict) -> pd.DataFrame:
 
 def fetch_dvf_etalab() -> pd.DataFrame:
     """
-    Récupère les prix médians m² DVF+ via l'API Etalab, pour Paris (code INSEE 75056
-    ou arrondissements 75101-75120), toutes les années disponibles.
-    Format : api_dvf (JSON list de mutations agrégées par commune × année)
+    Récupère les statistiques DVF (prix médian m²) pour les 20 arrondissements parisiens
+    via l'API tabular data.gouv.fr — dataset "Statistiques DVF" (Etalab).
+    Colonnes clés : code_geo (75101-75120), med_prix_m2_whole_appartement.
+    Format : api_dvf
     """
-    url = "https://apidf-preprod.cerema.fr/indicateurs/dv3f/communes/annuel/"
-    # Codes INSEE des 20 arrondissements parisiens
-    codes = [f"751{str(i).zfill(2)}" for i in range(1, 21)]
+    # API tabular data.gouv.fr — filtre sur echelle_geo=commune + codes Paris
+    RESOURCE_ID = "851d342f-9c96-41c1-924a-11a7a7aae8a6"
+    BASE = f"https://tabular-api.data.gouv.fr/api/resources/{RESOURCE_ID}/data/"
+    codes_paris = [f"751{str(i).zfill(2)}" for i in range(1, 21)]
     rows = []
 
-    log.info(f"  Fetch DVF+ Etalab (20 arrondissements, toutes années)")
-    for code in codes:
+    log.info("  Fetch DVF Statistiques totales — arrondissements Paris (75101-75120)")
+    for code in codes_paris:
         try:
-            r = requests.get(url, params={"coddep": "75", "codgeo": code, "ordering": "annee"}, timeout=30)
+            r = requests.get(
+                BASE,
+                params={"code_geo__exact": code, "page_size": 5},
+                timeout=30,
+            )
             r.raise_for_status()
             data = r.json()
-            results = data.get("results", data) if isinstance(data, dict) else data
-            for item in results:
-                item["code_insee"] = code
+            for item in data.get("data", []):
                 rows.append(item)
         except Exception as e:
-            log.warning(f"    DVF+ erreur pour {code} : {e}")
+            log.warning(f"    DVF erreur pour {code} : {e}")
 
     if not rows:
-        log.warning("    DVF+ : aucune donnée récupérée")
+        log.warning("    DVF : aucune donnée récupérée")
         return pd.DataFrame()
 
-    df = pd.json_normalize(rows)
-    log.info(f"    → {len(df)} lignes DVF+ récupérées")
+    df = pd.DataFrame(rows)
+    # Renomme pour cohérence avec le reste du pipeline
+    df = df.rename(columns={
+        "code_geo": "code_insee",
+        "med_prix_m2_whole_appartement": "prix_m2_median",
+        "nb_ventes_whole_appartement": "nb_ventes",
+    })
+    log.info(f"    → {len(df)} lignes DVF récupérées")
     return df
 
 

@@ -25,9 +25,7 @@ function scoreBar(score) {
 }
 
 export async function openSidebar(arrondissement, annee) {
-  const sidebar = document.getElementById("sidebar");
   const content = document.getElementById("sidebar-content");
-  sidebar.classList.remove("hidden");
 
   content.innerHTML = `<p class="loading">Chargement…</p>`;
 
@@ -132,6 +130,6 @@ export async function openSidebar(arrondissement, annee) {
 }
 
 export function closeSidebar() {
-  document.getElementById("sidebar").classList.add("hidden");
+  document.getElementById("sidebar-content").innerHTML = "";
   if (timelineChart) { timelineChart.destroy(); timelineChart = null; }
 }

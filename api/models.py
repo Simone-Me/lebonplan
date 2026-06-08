@@ -33,6 +33,7 @@ class KPIs(BaseModel):
 
     score_services: Optional[float] = None
     nb_ecoles: Optional[int] = None
+    nb_maternelles: Optional[int] = None
     nb_colleges: Optional[int] = None
     nb_bibliotheques: Optional[int] = None
     nb_bureaux_poste: Optional[int] = None

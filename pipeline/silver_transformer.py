@@ -201,13 +201,41 @@ def transform_ecoles(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def transform_idf_geo(df: pd.DataFrame) -> pd.DataFrame:
-    """Datasets IDF OpenData : colonnes lat/lon + département → filtre Paris (75)."""
+    """Datasets IDF OpenData : colonnes lat/lon + filtre Paris (75)."""
     df = _base_geo(df)
-    # Filtre Paris si colonne département disponible
+
+    before = len(df)
+
+    # 1. Code postal commence par 75
+    for cp_col in ["code_postal", "cp", "codepostal", "code_commune_insee"]:
+        if cp_col in df.columns:
+            df = df[df[cp_col].astype(str).str.startswith("75")]
+            if len(df) < before:
+                return df
+
+    # 2. Colonne département numérique (ex: "75") ou textuelle (ex: "Paris")
     for dep_col in ["departement", "dep", "code_dep", "num_dep"]:
         if dep_col in df.columns:
-            df = df[df[dep_col].astype(str).str.startswith("75")]
-            break
+            mask = (
+                df[dep_col].astype(str).str.startswith("75") |
+                df[dep_col].astype(str).str.lower().str.contains("paris")
+            )
+            df = df[mask]
+            if len(df) < before:
+                return df
+
+    # 3. Bbox géographique Paris (fallback)
+    if "location" in df.columns:
+        def in_paris(loc):
+            if not isinstance(loc, dict):
+                return True
+            coords = loc.get("coordinates", [])
+            if len(coords) == 2:
+                lon, lat = coords
+                return 2.22 <= lon <= 2.47 and 48.81 <= lat <= 48.91
+            return True
+        df = df[df["location"].apply(in_paris)]
+
     return df
 
 
@@ -355,22 +383,29 @@ def write_silver_minio(df: pd.DataFrame, dataset_id: str, indicateur: str, inges
     log.info(f"    ✓ MinIO silver → {key}")
 
 
+BULK_CHUNK = 5_000  # insert_many par batch de 5000 docs
+
 def write_silver_mongo(df: pd.DataFrame, collection_name: str, id_col: str | None):
-    """Upsert les documents dans MongoDB silver."""
+    """Écrit les documents dans MongoDB silver — bulk insert pour les gros datasets."""
     coll = db[collection_name]
     records = df.where(pd.notna(df), other=None).to_dict("records")
+    if not records:
+        return
 
-    if id_col and id_col in df.columns:
+    if id_col and id_col in df.columns and len(records) < 10_000:
+        # Upsert seulement pour les petits datasets avec clé métier
         ops = [UpdateOne({id_col: r[id_col]}, {"$set": r}, upsert=True) for r in records]
         result = coll.bulk_write(ops, ordered=False)
         log.info(f"    ✓ MongoDB {collection_name} — upserted={result.upserted_count} modified={result.modified_count}")
     else:
-        ingested_at = records[0].get("_ingested_at") if records else None
-        if ingested_at:
-            coll.delete_many({"_ingested_at": ingested_at})
-        if records:
-            coll.insert_many(records)
-        log.info(f"    ✓ MongoDB {collection_name} — {len(records)} insérés")
+        # Bulk insert : drop la collection + insert_many par chunks
+        coll.drop()
+        total = 0
+        for i in range(0, len(records), BULK_CHUNK):
+            chunk = records[i:i + BULK_CHUNK]
+            coll.insert_many(chunk, ordered=False)
+            total += len(chunk)
+        log.info(f"    ✓ MongoDB {collection_name} — {total} insérés (bulk)")
 
     if "location" in df.columns:
         try:

@@ -1,5 +1,7 @@
 import json
+import traceback
 from fastapi import APIRouter, Depends, Query
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 
@@ -7,9 +9,10 @@ from api.database import get_db
 from api.models import GeoFeatureCollection, GeoFeature, KPIs
 
 router = APIRouter()
+print("GEO ROUTER LOADED v2")
 
 
-@router.get("/geo/arrondissements", response_model=GeoFeatureCollection)
+@router.get("/geo/arrondissements")
 def get_arrondissements_geojson(
     annee: int = Query(default=None, description="Année des KPIs (défaut : dernière disponible)"),
     indicateur: str = Query(default="score_global", description="Indicateur à inclure"),
@@ -49,6 +52,7 @@ def get_arrondissements_geojson(
             k.nb_musees,
             k.score_services,
             k.nb_ecoles,
+            k.nb_maternelles,
             k.nb_colleges,
             k.nb_bibliotheques,
             k.nb_bureaux_poste,
@@ -60,23 +64,33 @@ def get_arrondissements_geojson(
         ORDER BY g.arrondissement
     """)
 
-    rows = db.execute(sql, {"annee": annee}).fetchall()
+    try:
+        rows = db.execute(sql, {"annee": annee}).fetchall()
+        print(f"[geo] SQL OK — {len(rows)} rows, annee={annee}")
+    except Exception as e:
+        print(f"[geo] SQL FAILED: {e}")
+        return JSONResponse(status_code=500, content={"error": "SQL failed", "detail": str(e)})
+
     features = []
     for row in rows:
-        row_dict = dict(row._mapping)
-        geometry = row_dict.pop("geometry")
-        nom = row_dict.pop("nom", "")
-        kpis = KPIs(
-            arrondissement=row_dict["arrondissement"],
-            annee=row_dict.get("annee") or annee,
-            **{k: v for k, v in row_dict.items() if k != "arrondissement"},
-        )
-        kpis_dict = kpis.model_dump()
-        kpis_dict["nom"] = nom
-        features.append({
-            "type": "Feature",
-            "geometry": geometry,
-            "properties": kpis_dict,
-        })
+        try:
+            row_dict = dict(row._mapping)
+            geometry = row_dict.pop("geometry")
+            nom = row_dict.pop("nom", "")
+            kpis_data = {k: v for k, v in row_dict.items() if k not in ("arrondissement", "annee")}
+            kpis = KPIs(
+                arrondissement=row_dict["arrondissement"],
+                annee=row_dict.get("annee") or annee,
+                **kpis_data,
+            )
+            kpis_dict = kpis.model_dump()
+            kpis_dict["nom"] = nom
+            features.append({
+                "type": "Feature",
+                "geometry": geometry,
+                "properties": kpis_dict,
+            })
+        except Exception as e:
+            return JSONResponse(status_code=500, content={"error": f"Row processing failed", "detail": str(e), "trace": traceback.format_exc()})
 
     return {"type": "FeatureCollection", "features": features}

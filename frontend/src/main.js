@@ -1,6 +1,6 @@
 import "maplibre-gl/dist/maplibre-gl.css";
 import { initMap, updateMapData } from "./map.js";
-import { openSidebar, closeSidebar } from "./sidebar.js";
+import { openSidebar } from "./sidebar.js";
 import { initCompare } from "./compare.js";
 import { initGeocode } from "./geocode.js";
 import { fetchGeoJSON } from "./api.js";
@@ -15,7 +15,7 @@ const INDICATEUR_LABELS = {
   pct_logements_sociaux:  "% Logements sociaux",
 };
 
-let currentAnnee = 2024;
+let currentAnnee = 2026;
 let currentIndicateur = "score_global";
 
 async function refreshMap() {
@@ -45,10 +45,8 @@ function updateLegend() {
 }
 
 function init() {
-  // Carte
   initMap((arr) => openSidebar(arr, currentAnnee));
 
-  // Contrôles header
   const indicateurSel = document.getElementById("indicateur-select");
   indicateurSel.addEventListener("change", () => {
     currentIndicateur = indicateurSel.value;
@@ -63,17 +61,9 @@ function init() {
     refreshMap();
   });
 
-  // Sidebar close
-  document.getElementById("sidebar-close").addEventListener("click", closeSidebar);
-
-  // Géocodage BAN
   initGeocode();
-
-  // Comparaison
   initCompare(() => currentAnnee);
 
-  // Chargement initial — attendre que la carte soit prête
-  // MapLibre émet "load" async ; on poll jusqu'à ce que la source soit prête
   const waitForMap = setInterval(() => {
     try {
       refreshMap();
@@ -82,4 +72,9 @@ function init() {
   }, 500);
 }
 
-init();
+// Attendre que le DOM soit prêt et le layout calculé
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", init);
+} else {
+  init();
+}

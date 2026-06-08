@@ -26,6 +26,12 @@ export function initMap(onArrClick) {
     zoom: 11.5,
   });
 
+  window.addEventListener("resize", () => map.resize());
+
+  // ResizeObserver : redimensionne la carte dès que le conteneur change de taille
+  const ro = new ResizeObserver(() => map.resize());
+  ro.observe(document.getElementById("map-container"));
+
   map.addControl(new maplibregl.NavigationControl(), "top-left");
 
   popup = new maplibregl.Popup({
@@ -34,7 +40,10 @@ export function initMap(onArrClick) {
     className: "map-popup",
   });
 
+  window._map = map;
+
   map.on("load", () => {
+    map.resize();
     map.addSource("arrondissements", {
       type: "geojson",
       data: { type: "FeatureCollection", features: [] },

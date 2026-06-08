@@ -73,27 +73,68 @@ def safe_get(d: dict, arr: int, default=0):
     return v if v is not None and not (isinstance(v, float) and math.isnan(v)) else default
 
 
+def weighted_avg(scored_pairs: list, skip_zero_collections: bool = True) -> dict:
+    """
+    Moyenne pondérée de sous-scores normalisés par arrondissement.
+
+    scored_pairs : liste de (scores_dict {arr: float}, poids int)
+    skip_zero_collections : si True, ignore les collections où tous les arrondissements = 0
+      (évite de pénaliser un arrondissement quand toute une source est vide)
+    """
+    result = {arr: {"num": 0.0, "den": 0} for arr in ARRONDISSEMENTS}
+    for scores, poids in scored_pairs:
+        if skip_zero_collections and all(v == 0 for v in scores.values()):
+            continue
+        for arr in ARRONDISSEMENTS:
+            result[arr]["num"] += scores.get(arr, 0) * poids
+            result[arr]["den"] += poids
+    return {
+        arr: round(result[arr]["num"] / result[arr]["den"], 2) if result[arr]["den"] > 0 else 0.0
+        for arr in ARRONDISSEMENTS
+    }
+
+
+def invert(scores: dict) -> dict:
+    """Inverse un dict de scores normalisés 0-100 → (100 - score)."""
+    return {arr: round(100 - v, 2) for arr, v in scores.items()}
+
+
 # ─── Agrégations par indicateur ───────────────────────────────────────────────
 
+# Scoring Indicateur 1 — Qualité de vie
+#
+# Source                  | Collection            | Champ      | Poids | Signe
+# ----------------------- | --------------------- | ---------- | ----- | ------
+# Espaces verts / îlots   | silver_espaces_verts  | COUNT      |   2   | +
+# Arbres                  | silver_arbres         | COUNT      |   1   | +
+# Sanisettes              | silver_sanisettes     | COUNT      |   1   | +
+# Fibre (% déployé)       | silver_fibre_imb      | % déployé  |   1   | +
+# Chantiers               | silver_chantiers      | COUNT      |   1   | - (inversé)
+# Anomalies signalées     | silver_anomalies      | COUNT      |   1   | - (inversé)
+# Qualité air NO2         | silver_qualite_air    | no2 (avg)  |   1   | - (inversé)
+
 def agg_qualite_vie(db) -> dict:
-    """Retourne un dict {arr: {champs...}} pour l'indicateur qualité de vie."""
     espaces_verts = count_by_arr(db["silver_espaces_verts"])
     arbres        = count_by_arr(db["silver_arbres"])
     sanisettes    = count_by_arr(db["silver_sanisettes"])
     chantiers     = count_by_arr(db["silver_chantiers"])
     anomalies     = count_by_arr(db["silver_anomalies"])
 
-    # Air quality : données Paris-wide (pas par arrondissement) → valeur unique propagée
-    air_doc = db["silver_qualite_air"].find_one(sort=[("annee", -1)])
-    score_air_no2  = float(air_doc.get("no2", 0)) if air_doc else 0.0
+    # Air : données Paris-wide → valeur propagée à tous les arrondissements
+    air_doc        = db["silver_qualite_air"].find_one(sort=[("annee", -1)])
+    score_air_no2  = float(air_doc.get("no2", 0))   if air_doc else 0.0
     score_air_pm25 = float(air_doc.get("pm2_5", 0)) if air_doc else 0.0
+    # NO2 normalisé sur 100 µg/m³ (seuil OMS annuel) puis inversé
+    no2_norm = {a: min(score_air_no2 / 100.0 * 100, 100) for a in ARRONDISSEMENTS}
 
-    # Fibre : % couverture par arrondissement (base_imb)
+    # Fibre : % immeubles avec statut "Déployé" par arrondissement
     pct_fibre = {}
     for arr in ARRONDISSEMENTS:
-        total = db["silver_fibre_imb"].count_documents({"arrondissement": arr})
-        couverts = db["silver_fibre_imb"].count_documents({"arrondissement": arr, "statut_immeuble": {"$regex": "Déployé", "$options": "i"}}) if total else 0
-        pct_fibre[arr] = round(couverts / total * 100, 1) if total else None
+        total    = db["silver_fibre_imb"].count_documents({"arrondissement": arr})
+        deployes = db["silver_fibre_imb"].count_documents(
+            {"arrondissement": arr, "statut_immeuble": {"$regex": "Déployé", "$options": "i"}}
+        ) if total else 0
+        pct_fibre[arr] = round(deployes / total * 100, 1) if total else 0
 
     result = {}
     for arr in ARRONDISSEMENTS:
@@ -105,31 +146,44 @@ def agg_qualite_vie(db) -> dict:
             "nb_anomalies":        safe_get(anomalies, arr),
             "score_air_no2":       score_air_no2,
             "score_air_pm25":      score_air_pm25,
-            "pct_fibre":           pct_fibre.get(arr),
+            "pct_fibre":           pct_fibre.get(arr, 0),
         }
 
-    # Score composite : positif = espaces_verts + arbres + sanisettes + fibre
-    #                   négatif = chantiers + anomalies
-    pos_espaces = minmax_normalize({a: result[a]["nb_espaces_verts"] for a in ARRONDISSEMENTS})
-    pos_arbres  = minmax_normalize({a: result[a]["nb_arbres"]        for a in ARRONDISSEMENTS})
-    pos_san     = minmax_normalize({a: result[a]["nb_sanisettes"]    for a in ARRONDISSEMENTS})
-    # Air : NO2 plus bas = meilleur → inversion
-    inv_no2     = {a: 100 - min(score_air_no2, 100) for a in ARRONDISSEMENTS}
-    neg_chant   = minmax_normalize({a: result[a]["nb_chantiers_actifs"] for a in ARRONDISSEMENTS})
-    neg_anom    = minmax_normalize({a: result[a]["nb_anomalies"]        for a in ARRONDISSEMENTS})
+    s_ev  = minmax_normalize({a: result[a]["nb_espaces_verts"]    for a in ARRONDISSEMENTS})
+    s_arb = minmax_normalize({a: result[a]["nb_arbres"]           for a in ARRONDISSEMENTS})
+    s_san = minmax_normalize({a: result[a]["nb_sanisettes"]       for a in ARRONDISSEMENTS})
+    s_fib = minmax_normalize({a: result[a]["pct_fibre"]           for a in ARRONDISSEMENTS})
+    s_cha = invert(minmax_normalize({a: result[a]["nb_chantiers_actifs"] for a in ARRONDISSEMENTS}))
+    s_ano = invert(minmax_normalize({a: result[a]["nb_anomalies"]        for a in ARRONDISSEMENTS}))
+    s_air = invert(no2_norm)  # NO2 bas = meilleur
 
+    scores = weighted_avg([
+        (s_ev,  2),
+        (s_arb, 1),
+        (s_san, 1),
+        (s_fib, 1),
+        (s_cha, 1),
+        (s_ano, 1),
+        (s_air, 1),
+    ])
     for arr in ARRONDISSEMENTS:
-        pos = (pos_espaces[arr] + pos_arbres[arr] + pos_san[arr] + inv_no2[arr]) / 4
-        neg = (neg_chant[arr] + neg_anom[arr]) / 2
-        result[arr]["score_qualite_vie"] = round((pos * 0.7 + (100 - neg) * 0.3), 2)
+        result[arr]["score_qualite_vie"] = scores[arr]
 
     return result
 
 
+# Scoring Indicateur 2 — Transports
+#
+# Source              | Collection                  | Champ        | Poids | Signe
+# ------------------- | --------------------------- | ------------ | ----- | -----
+# Gares               | silver_gares                | COUNT        |   2   | +
+# Vélib stations      | silver_velib                | COUNT        |   2   | +
+# Flux multimodal     | silver_comptage_multimodal  | SUM(q)       |   1   | +
+
 def agg_transports(db) -> dict:
-    gares  = count_by_arr(db["silver_gares"])
-    velib  = count_by_arr(db["silver_velib"])
-    flux   = {doc["_id"]: doc["flux"] for doc in db["silver_comptage_multimodal"].aggregate([
+    gares = count_by_arr(db["silver_gares"])
+    velib = count_by_arr(db["silver_velib"])
+    flux  = {doc["_id"]: doc["flux"] for doc in db["silver_comptage_multimodal"].aggregate([
         {"$match": {"arrondissement": {"$in": ARRONDISSEMENTS}}},
         {"$group": {"_id": "$arrondissement", "flux": {"$sum": {"$ifNull": ["$q", 1]}}}},
     ])}
@@ -142,15 +196,25 @@ def agg_transports(db) -> dict:
             "flux_multimodal":   safe_get(flux, arr),
         }
 
-    s_gares = minmax_normalize({a: result[a]["nb_gares"]          for a in ARRONDISSEMENTS})
-    s_velib = minmax_normalize({a: result[a]["nb_stations_velib"]  for a in ARRONDISSEMENTS})
-    s_flux  = minmax_normalize({a: result[a]["flux_multimodal"]    for a in ARRONDISSEMENTS})
+    s_gar  = minmax_normalize({a: result[a]["nb_gares"]           for a in ARRONDISSEMENTS})
+    s_vel  = minmax_normalize({a: result[a]["nb_stations_velib"]  for a in ARRONDISSEMENTS})
+    s_flux = minmax_normalize({a: result[a]["flux_multimodal"]    for a in ARRONDISSEMENTS})
 
+    scores = weighted_avg([(s_gar, 2), (s_vel, 2), (s_flux, 1)])
     for arr in ARRONDISSEMENTS:
-        result[arr]["score_transports"] = round((s_gares[arr] + s_velib[arr] + s_flux[arr]) / 3, 2)
+        result[arr]["score_transports"] = scores[arr]
 
     return result
 
+
+# Scoring Indicateur 3 — Loisirs
+#
+# Source          | Collection          | Champ  | Poids | Signe
+# --------------- | ------------------- | ------ | ----- | -----
+# Événements      | silver_evenements   | COUNT  |   2   | +
+# Terrasses       | silver_terrasses    | COUNT  |   1   | +
+# Cinémas         | silver_cinemas      | COUNT  |   1   | +
+# Musées          | silver_musees       | COUNT  |   1   | +
 
 def agg_loisirs(db) -> dict:
     evenements = count_by_arr(db["silver_evenements"])
@@ -167,28 +231,42 @@ def agg_loisirs(db) -> dict:
             "nb_musees":     safe_get(musees, arr),
         }
 
-    s_evt  = minmax_normalize({a: result[a]["nb_evenements"] for a in ARRONDISSEMENTS})
-    s_ter  = minmax_normalize({a: result[a]["nb_terrasses"]  for a in ARRONDISSEMENTS})
-    s_cin  = minmax_normalize({a: result[a]["nb_cinemas"]    for a in ARRONDISSEMENTS})
-    s_mus  = minmax_normalize({a: result[a]["nb_musees"]     for a in ARRONDISSEMENTS})
+    s_evt = minmax_normalize({a: result[a]["nb_evenements"] for a in ARRONDISSEMENTS})
+    s_ter = minmax_normalize({a: result[a]["nb_terrasses"]  for a in ARRONDISSEMENTS})
+    s_cin = minmax_normalize({a: result[a]["nb_cinemas"]    for a in ARRONDISSEMENTS})
+    s_mus = minmax_normalize({a: result[a]["nb_musees"]     for a in ARRONDISSEMENTS})
 
+    scores = weighted_avg([(s_evt, 2), (s_ter, 1), (s_cin, 1), (s_mus, 1)])
     for arr in ARRONDISSEMENTS:
-        result[arr]["score_loisirs"] = round((s_evt[arr] + s_ter[arr] + s_cin[arr] + s_mus[arr]) / 4, 2)
+        result[arr]["score_loisirs"] = scores[arr]
 
     return result
 
 
+# Scoring Indicateur 4 — Services publics
+#
+# Source                  | Collection              | Champ  | Poids | Signe
+# ----------------------- | ----------------------- | ------ | ----- | -----
+# Écoles élémentaires     | silver_ecoles_elem      | COUNT  |   2   | +
+# Maternelles             | silver_maternelles      | COUNT  |   2   | +
+# Collèges                | silver_colleges         | COUNT  |   1   | +
+# Bibliothèques           | silver_bibliotheques    | COUNT  |   2   | +
+# Bureaux de poste        | silver_bureaux_poste    | COUNT  |   1   | +
+# Enseignement supérieur  | silver_ensup            | COUNT  |   1   | +
+
 def agg_services(db) -> dict:
-    ecoles    = count_by_arr(db["silver_ecoles_elem"])
-    colleges  = count_by_arr(db["silver_colleges"])
-    biblio    = count_by_arr(db["silver_bibliotheques"])
-    poste     = count_by_arr(db["silver_bureaux_poste"])
-    ensup     = count_by_arr(db["silver_ensup"])
+    ecoles      = count_by_arr(db["silver_ecoles_elem"])
+    maternelles = count_by_arr(db["silver_maternelles"])
+    colleges    = count_by_arr(db["silver_colleges"])
+    biblio      = count_by_arr(db["silver_bibliotheques"])
+    poste       = count_by_arr(db["silver_bureaux_poste"])
+    ensup       = count_by_arr(db["silver_ensup"])
 
     result = {}
     for arr in ARRONDISSEMENTS:
         result[arr] = {
             "nb_ecoles":        safe_get(ecoles, arr),
+            "nb_maternelles":   safe_get(maternelles, arr),
             "nb_colleges":      safe_get(colleges, arr),
             "nb_bibliotheques": safe_get(biblio, arr),
             "nb_bureaux_poste": safe_get(poste, arr),
@@ -196,13 +274,15 @@ def agg_services(db) -> dict:
         }
 
     s_eco = minmax_normalize({a: result[a]["nb_ecoles"]        for a in ARRONDISSEMENTS})
+    s_mat = minmax_normalize({a: result[a]["nb_maternelles"]   for a in ARRONDISSEMENTS})
     s_col = minmax_normalize({a: result[a]["nb_colleges"]      for a in ARRONDISSEMENTS})
     s_bib = minmax_normalize({a: result[a]["nb_bibliotheques"] for a in ARRONDISSEMENTS})
     s_pos = minmax_normalize({a: result[a]["nb_bureaux_poste"] for a in ARRONDISSEMENTS})
     s_ens = minmax_normalize({a: result[a]["nb_ensup"]         for a in ARRONDISSEMENTS})
 
+    scores = weighted_avg([(s_eco, 2), (s_mat, 2), (s_col, 1), (s_bib, 2), (s_pos, 1), (s_ens, 1)])
     for arr in ARRONDISSEMENTS:
-        result[arr]["score_services"] = round((s_eco[arr] + s_col[arr] + s_bib[arr] + s_pos[arr] + s_ens[arr]) / 5, 2)
+        result[arr]["score_services"] = scores[arr]
 
     return result
 
@@ -219,20 +299,15 @@ def agg_immobilier(db, annee: int) -> dict:
         if arr and val is not None:
             prix_m2[arr] = float(val)
 
-    # Fallback : année la plus récente disponible si l'année demandée n'existe pas
+    # Fallback : toutes les lignes disponibles (pas de filtre année)
     if not prix_m2:
-        latest = db["silver_dvf"].find_one(
-            {"arrondissement": {"$in": ARRONDISSEMENTS}, "prix_m2_median": {"$exists": True}},
-            sort=[("annee", -1)],
-        )
-        if latest:
-            for doc in db["silver_dvf"].find(
-                {"annee": latest["annee"], "arrondissement": {"$in": ARRONDISSEMENTS}}
-            ):
-                arr = doc.get("arrondissement")
-                val = doc.get("prix_m2_median")
-                if arr and val is not None:
-                    prix_m2[arr] = float(val)
+        for doc in db["silver_dvf"].find(
+            {"arrondissement": {"$in": ARRONDISSEMENTS}, "prix_m2_median": {"$exists": True}}
+        ):
+            arr = doc.get("arrondissement")
+            val = doc.get("prix_m2_median")
+            if arr and val is not None and arr not in prix_m2:
+                prix_m2[arr] = float(val)
 
     result = {}
     for arr in ARRONDISSEMENTS:
@@ -248,7 +323,7 @@ def agg_immobilier(db, annee: int) -> dict:
 
 def load_arrondissements_geo(engine):
     """Télécharge et insère le GeoJSON des arrondissements depuis parisdata."""
-    url = "https://parisdata.opendatasoft.com/api/explore/v2.1/catalog/datasets/arrondissements-paris-1arron/exports/geojson"
+    url = "https://opendata.paris.fr/api/explore/v2.1/catalog/datasets/arrondissements/exports/geojson?lang=fr&timezone=Europe%2FParis"
     log.info(f"  Téléchargement GeoJSON arrondissements...")
     try:
         r = requests.get(url, timeout=30)
@@ -307,7 +382,7 @@ def upsert_kpis(engine, kpis_by_arr: dict, annee: int):
             nb_sanisettes, nb_chantiers_actifs, nb_anomalies,
             score_transports, nb_gares, nb_stations_velib, flux_multimodal,
             score_loisirs, nb_evenements, nb_cinemas, nb_terrasses, nb_musees,
-            score_services, nb_ecoles, nb_colleges, nb_bibliotheques,
+            score_services, nb_ecoles, nb_maternelles, nb_colleges, nb_bibliotheques,
             nb_bureaux_poste, nb_ensup,
             score_global
         ) VALUES (
@@ -318,7 +393,7 @@ def upsert_kpis(engine, kpis_by_arr: dict, annee: int):
             :nb_sanisettes, :nb_chantiers_actifs, :nb_anomalies,
             :score_transports, :nb_gares, :nb_stations_velib, :flux_multimodal,
             :score_loisirs, :nb_evenements, :nb_cinemas, :nb_terrasses, :nb_musees,
-            :score_services, :nb_ecoles, :nb_colleges, :nb_bibliotheques,
+            :score_services, :nb_ecoles, :nb_maternelles, :nb_colleges, :nb_bibliotheques,
             :nb_bureaux_poste, :nb_ensup,
             :score_global
         )
@@ -346,6 +421,7 @@ def upsert_kpis(engine, kpis_by_arr: dict, annee: int):
             nb_musees             = EXCLUDED.nb_musees,
             score_services        = EXCLUDED.score_services,
             nb_ecoles             = EXCLUDED.nb_ecoles,
+            nb_maternelles        = EXCLUDED.nb_maternelles,
             nb_colleges           = EXCLUDED.nb_colleges,
             nb_bibliotheques      = EXCLUDED.nb_bibliotheques,
             nb_bureaux_poste      = EXCLUDED.nb_bureaux_poste,

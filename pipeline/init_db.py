@@ -60,6 +60,7 @@ CREATE TABLE IF NOT EXISTS gold.arrondissement_kpis (
     -- Indicateur 4 : Services publics
     score_services          FLOAT,
     nb_ecoles               INT,
+    nb_maternelles          INT,
     nb_colleges             INT,
     nb_bibliotheques        INT,
     nb_bureaux_poste        INT,
@@ -74,6 +75,9 @@ CREATE TABLE IF NOT EXISTS gold.arrondissement_kpis (
 CREATE INDEX IF NOT EXISTS idx_kpis_arrondissement ON gold.arrondissement_kpis (arrondissement);
 CREATE INDEX IF NOT EXISTS idx_kpis_annee          ON gold.arrondissement_kpis (annee);
 CREATE INDEX IF NOT EXISTS idx_geo_geom            ON gold.arrondissements_geo USING GIST (geom);
+
+-- Migrations : colonnes ajoutées après la création initiale
+ALTER TABLE gold.arrondissement_kpis ADD COLUMN IF NOT EXISTS nb_maternelles INT;
 """
 
 
