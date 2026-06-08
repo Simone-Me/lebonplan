@@ -1,15 +1,16 @@
-<<<<<<< HEAD
+# Données sensibles / volumineuses
 data/
 datasrc/
-mcp.json
-__pycache__/
-*.pyc
+sources/
+*.csv
+*.parquet
+*.xlsx
+*.xls
+
+# Config locale
 .env
-=======
-# Environnement virtuel
-.venv/
-venv/
-env/
+mcp.json
+.claude
 
 # Python
 __pycache__/
@@ -21,16 +22,14 @@ __pycache__/
 dist/
 build/
 
+# Environnement virtuel
+.venv/
+venv/
+env/
+
 # Jupyter
 .ipynb_checkpoints/
 *.ipynb_checkpoints
-
-# Données sensibles / volumineuses
-sources/
-*.csv
-*.parquet
-*.xlsx
-*.xls
 
 # OS
 .DS_Store
@@ -43,8 +42,3 @@ desktop.ini
 
 # Logs
 *.log
-
-/data
-
-mcp.json
->>>>>>> c27f1b4ace9841fe7be748d63a7ad727607cb73e

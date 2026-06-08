@@ -1,5 +1,5 @@
 """
-Silver Layer Transformer — Indicateur Qualité de Vie Paris
+Silver Layer Transformer — Urban Data Explorer Paris
 Bronze (MinIO "bronze") → Silver (MinIO "silver" Parquet + MongoDB documents)
 """
 
@@ -10,9 +10,14 @@ import re
 import pandas as pd
 import boto3
 from io import BytesIO
-from datetime import date
 from pymongo import MongoClient, UpdateOne
 from botocore.exceptions import ClientError
+
+from config import (
+    MINIO_ENDPOINT, MINIO_ACCESS_KEY, MINIO_SECRET_KEY,
+    BUCKET_BRONZE, BUCKET_SILVER,
+    MONGO_URI, MONGO_DB,
+)
 
 # ─── Config ───────────────────────────────────────────────────────────────────
 
@@ -27,17 +32,15 @@ log = logging.getLogger("silver_transformer")
 
 s3 = boto3.client(
     "s3",
-    endpoint_url="http://localhost:9000",
-    aws_access_key_id="admin",
-    aws_secret_access_key="password123",
+    endpoint_url=MINIO_ENDPOINT,
+    aws_access_key_id=MINIO_ACCESS_KEY,
+    aws_secret_access_key=MINIO_SECRET_KEY,
 )
-BUCKET_BRONZE = "bronze"
-BUCKET_SILVER = "silver"
 
 # ─── MongoDB ──────────────────────────────────────────────────────────────────
 
-mongo = MongoClient("mongodb://localhost:27017")
-db = mongo["silver"]
+mongo = MongoClient(MONGO_URI)
+db = mongo[MONGO_DB]
 
 # ─── Geo helpers ──────────────────────────────────────────────────────────────
 
@@ -59,17 +62,15 @@ def wkb_hex_to_geojson(hex_val) -> dict | None:
 def parse_arrondissement(val) -> int | None:
     """
     Normalise arrondissement → int 1-20.
-    Gère "75017", "75117" (code INSEE), "PARIS 17E ARRDT"
+    Gère "75017", "75117" (code INSEE), "PARIS 17E ARRDT", "17e", "17"
     """
-    if pd.isna(val):
+    if val is None or (isinstance(val, float) and pd.isna(val)):
         return None
     s = str(val).strip()
-    # "75017" ou "75117" (code INSEE arrondissement)
     m = re.match(r"^75[01](\d{2})$", s)
     if m:
         n = int(m.group(1))
         return n if 1 <= n <= 20 else None
-    # "PARIS 17E ARRDT" → extrait premier nombre
     m = re.search(r"\b(\d{1,2})\b", s)
     if m:
         n = int(m.group(1))
@@ -89,27 +90,49 @@ def lambert93_to_wgs84(x_series, y_series):
         return None, None
 
 
-# ─── Transformers ─────────────────────────────────────────────────────────────
+def latlon_cols_to_geojson(lat_col, lon_col) -> list:
+    """Convertit deux séries lat/lon → liste de GeoJSON Points."""
+    result = []
+    for lat, lon in zip(lat_col, lon_col):
+        try:
+            if pd.notna(lat) and pd.notna(lon):
+                result.append({"type": "Point", "coordinates": [float(lon), float(lat)]})
+            else:
+                result.append(None)
+        except Exception:
+            result.append(None)
+    return result
+
+
+# ─── Base transformer ─────────────────────────────────────────────────────────
 
 def _base_geo(df: pd.DataFrame) -> pd.DataFrame:
     """Appliqué à tous les datasets : décode geo_point_2d + normalise arrondissement."""
     if "geo_point_2d" in df.columns:
         df["location"] = df["geo_point_2d"].apply(wkb_hex_to_geojson)
         df = df.drop(columns=["geo_point_2d"])
-    # geo_shape (polygones) : trop lourd pour Silver, retiré
     if "geo_shape" in df.columns:
         df = df.drop(columns=["geo_shape"])
-    if "arrondissement" in df.columns:
-        df["arrondissement"] = df["arrondissement"].apply(parse_arrondissement)
+    # Colonnes lat/lon explicites (API IDF)
+    for lat_c, lon_c in [("lat", "lon"), ("latitude", "longitude"), ("ylatitude", "xlongitude")]:
+        if lat_c in df.columns and lon_c in df.columns and "location" not in df.columns:
+            df["location"] = latlon_cols_to_geojson(df[lat_c], df[lon_c])
+    # Arrondissement
+    for col in ["arrondissement", "cp_arrondissement", "code_postal", "arr_insee", "arr_libelle"]:
+        if col in df.columns:
+            df["arrondissement"] = df[col].apply(parse_arrondissement)
+            break
     return df
 
+
+# ─── Transformers spécifiques ─────────────────────────────────────────────────
 
 def transform_espaces_verts(df: pd.DataFrame) -> pd.DataFrame:
     df = _base_geo(df)
     keep = [
         "identifiant", "nom", "type", "arrondissement",
         "statut_ouverture", "ouvert_24h", "adresse", "location",
-        "_ingested_at", "_dataset_id", "_signe", "_source",
+        "_ingested_at", "_dataset_id", "_indicateur", "_signe", "_source",
     ]
     return df[[c for c in keep if c in df.columns]]
 
@@ -119,7 +142,7 @@ def transform_equipements(df: pd.DataFrame) -> pd.DataFrame:
     keep = [
         "identifiant", "nom", "type", "payant", "arrondissement",
         "statut_ouverture", "adresse", "location",
-        "_ingested_at", "_dataset_id", "_signe", "_source",
+        "_ingested_at", "_dataset_id", "_indicateur", "_signe", "_source",
     ]
     return df[[c for c in keep if c in df.columns]]
 
@@ -129,20 +152,18 @@ def transform_arbres(df: pd.DataFrame) -> pd.DataFrame:
     keep = [
         "idbase", "libellefrancais", "genre", "espece", "domanialite",
         "arrondissement", "adresse", "hauteurencm", "circonferenceencm",
-        "location", "_ingested_at", "_dataset_id", "_signe", "_source",
+        "location", "_ingested_at", "_dataset_id", "_indicateur", "_signe", "_source",
     ]
     return df[[c for c in keep if c in df.columns]]
 
 
 def transform_qualite_air(df: pd.DataFrame) -> pd.DataFrame:
-    # Données annuelles Paris-wide : pas de géo
     num_cols = df.select_dtypes(include="number").columns.tolist()
-    keep = ["annee"] + num_cols + ["_ingested_at", "_dataset_id", "_signe", "_source"]
+    keep = ["annee"] + num_cols + ["_ingested_at", "_dataset_id", "_indicateur", "_signe", "_source"]
     return df[[c for c in keep if c in df.columns]]
 
 
 def transform_fibre_imb(df: pd.DataFrame) -> pd.DataFrame:
-    """base_imb_75 : coordonnées Lambert-93 → WGS84, code_insee → arrondissement."""
     if "imb_x" in df.columns and "imb_y" in df.columns:
         lons, lats = lambert93_to_wgs84(df["imb_x"], df["imb_y"])
         if lons is not None:
@@ -157,8 +178,37 @@ def transform_fibre_imb(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def transform_api_geo(df: pd.DataFrame) -> pd.DataFrame:
-    """Datasets API Paris : geo_point_2d WKB + arrondissement."""
+    """Datasets API Paris OpenDataSoft : geo_point_2d WKB + arrondissement."""
     return _base_geo(df)
+
+
+def transform_ecoles(df: pd.DataFrame) -> pd.DataFrame:
+    df = _base_geo(df)
+    keep = [
+        "identifiant_de_l_etablissement", "nom_etablissement", "type_etablissement",
+        "arrondissement", "adresse_1", "location",
+        "_ingested_at", "_dataset_id", "_indicateur", "_signe", "_source",
+    ]
+    # Noms alternatifs selon le dataset
+    rename_map = {
+        "nom": "nom_etablissement",
+        "libelle": "nom_etablissement",
+        "type_etabll": "type_etablissement",
+        "adresse": "adresse_1",
+    }
+    df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns and v not in df.columns})
+    return df[[c for c in keep if c in df.columns]]
+
+
+def transform_idf_geo(df: pd.DataFrame) -> pd.DataFrame:
+    """Datasets IDF OpenData : colonnes lat/lon + département → filtre Paris (75)."""
+    df = _base_geo(df)
+    # Filtre Paris si colonne département disponible
+    for dep_col in ["departement", "dep", "code_dep", "num_dep"]:
+        if dep_col in df.columns:
+            df = df[df[dep_col].astype(str).str.startswith("75")]
+            break
+    return df
 
 
 def transform_passthrough(df: pd.DataFrame) -> pd.DataFrame:
@@ -166,30 +216,79 @@ def transform_passthrough(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ─── Dataset registry ─────────────────────────────────────────────────────────
-# (collection_mongo, transformer, colonne_id_pour_upsert)
+# (collection_mongo, transformer, colonne_id_pour_upsert, indicateur)
 
 SILVER_CONFIG = {
-    "ilots_fraicheur_espaces_verts": ("silver_espaces_verts",    transform_espaces_verts, "identifiant"),
-    "ilots_fraicheur_equipements":   ("silver_equipements",      transform_equipements,   "identifiant"),
-    "arbres":                        ("silver_arbres",           transform_arbres,        "idbase"),
-    "qualite_air":                   ("silver_qualite_air",      transform_qualite_air,   "annee"),
-    "fibre_actuel":                  ("silver_fibre_actuel",     transform_passthrough,   None),
-    "fibre_base_imb":                ("silver_fibre_imb",        transform_fibre_imb,     "imb_id"),
-    "fibre_base_imb_fc":             ("silver_fibre_imb_fc",     transform_passthrough,   "immeuble_id"),
-    "fibre_debit_filaire":           ("silver_fibre_debit",      transform_passthrough,   "code_dep"),
-    "fibre_operateur":               ("silver_fibre_operateur",  transform_passthrough,   "code"),
-    "sanisettes":                    ("silver_sanisettes",       transform_api_geo,       None),
-    "trafic_routier":                ("silver_trafic",           transform_api_geo,       None),
-    "chantiers":                     ("silver_chantiers",        transform_api_geo,       None),
-    "anomalies":                     ("silver_anomalies",        transform_api_geo,       None),
-    "zones_touristiques":            ("silver_zones_touristiques", transform_api_geo,     None),
-    "terrasses":                     ("silver_terrasses",        transform_api_geo,       None),
+    # Qualité de vie
+    "ilots_fraicheur_espaces_verts": ("silver_espaces_verts",      transform_espaces_verts, "identifiant",   "qualite_vie"),
+    "ilots_fraicheur_equipements":   ("silver_equipements",        transform_equipements,   "identifiant",   "qualite_vie"),
+    "arbres":                        ("silver_arbres",             transform_arbres,        "idbase",        "qualite_vie"),
+    "qualite_air":                   ("silver_qualite_air",        transform_qualite_air,   "annee",         "qualite_vie"),
+    "fibre_actuel":                  ("silver_fibre_actuel",       transform_passthrough,   None,            "qualite_vie"),
+    "fibre_base_imb":                ("silver_fibre_imb",          transform_fibre_imb,     "imb_id",        "qualite_vie"),
+    "fibre_base_imb_fc":             ("silver_fibre_imb_fc",       transform_passthrough,   "immeuble_id",   "qualite_vie"),
+    "fibre_debit_filaire":           ("silver_fibre_debit",        transform_passthrough,   "code_dep",      "qualite_vie"),
+    "fibre_operateur":               ("silver_fibre_operateur",    transform_passthrough,   "code",          "qualite_vie"),
+    "sanisettes":                    ("silver_sanisettes",         transform_api_geo,       None,            "qualite_vie"),
+    "chantiers":                     ("silver_chantiers",          transform_api_geo,       None,            "qualite_vie"),
+    "anomalies":                     ("silver_anomalies",          transform_api_geo,       None,            "qualite_vie"),
+    "zones_touristiques":            ("silver_zones_touristiques", transform_api_geo,       None,            "qualite_vie"),
+    # Transports
+    "comptage_multimodal":           ("silver_comptage_multimodal", transform_api_geo,      None,            "transports"),
+    "velib":                         ("silver_velib",              transform_api_geo,       "stationcode",   "transports"),
+    "gares":                         ("silver_gares",              transform_idf_geo,       None,            "transports"),
+    # Loisirs
+    "evenements_paris":              ("silver_evenements",         transform_api_geo,       None,            "loisirs"),
+    "terrasses":                     ("silver_terrasses",          transform_api_geo,       None,            "loisirs"),
+    "cinemas_idf":                   ("silver_cinemas",            transform_idf_geo,       None,            "loisirs"),
+    "musees_idf":                    ("silver_musees",             transform_idf_geo,       None,            "loisirs"),
+    # Services publics
+    "ecoles_elementaires":           ("silver_ecoles_elem",        transform_ecoles,        None,            "services_publics"),
+    "maternelles_secteurs":          ("silver_maternelles",        transform_api_geo,       None,            "services_publics"),
+    "colleges_secteurs":             ("silver_colleges",           transform_api_geo,       None,            "services_publics"),
+    "bibliotheques":                 ("silver_bibliotheques",      transform_api_geo,       None,            "services_publics"),
+    "enseignement_superieur":        ("silver_ensup",              transform_idf_geo,       None,            "services_publics"),
+    "bureaux_poste":                 ("silver_bureaux_poste",      transform_idf_geo,       None,            "services_publics"),
+    # Immobilier
+    "logements_sociaux":             ("silver_logements_sociaux",  transform_api_geo,       None,            "immobilier"),
+}
+
+# ─── Source map (dataset_id → source) ─────────────────────────────────────────
+
+SOURCE_MAP = {
+    "ilots_fraicheur_espaces_verts": "paris_opendata",
+    "ilots_fraicheur_equipements":   "paris_opendata",
+    "arbres":                        "paris_opendata",
+    "qualite_air":                   "datagouv",
+    "fibre_actuel":                  "datagouv",
+    "fibre_base_imb":                "datagouv",
+    "fibre_base_imb_fc":             "datagouv",
+    "fibre_debit_filaire":           "datagouv",
+    "fibre_operateur":               "datagouv",
+    "sanisettes":                    "paris_opendata",
+    "chantiers":                     "paris_opendata",
+    "anomalies":                     "paris_opendata",
+    "zones_touristiques":            "paris_opendata",
+    "comptage_multimodal":           "paris_opendata",
+    "velib":                         "transport_gouv",
+    "gares":                         "transport_gouv",
+    "evenements_paris":              "paris_opendata",
+    "terrasses":                     "paris_opendata",
+    "cinemas_idf":                   "idf_opendata",
+    "musees_idf":                    "idf_opendata",
+    "ecoles_elementaires":           "paris_opendata",
+    "maternelles_secteurs":          "paris_opendata",
+    "colleges_secteurs":             "paris_opendata",
+    "bibliotheques":                 "paris_opendata",
+    "enseignement_superieur":        "idf_opendata",
+    "bureaux_poste":                 "idf_opendata",
+    "logements_sociaux":             "paris_opendata",
 }
 
 # ─── MinIO reader ─────────────────────────────────────────────────────────────
 
 def latest_ingestion_date() -> str | None:
-    """Trouve la partition ingestion_date= la plus récente dans MinIO."""
+    """Trouve la partition ingestion_date= la plus récente dans MinIO bronze."""
     paginator = s3.get_paginator("list_objects_v2")
     dates = set()
     for page in paginator.paginate(Bucket=BUCKET_BRONZE, Delimiter="/"):
@@ -200,9 +299,9 @@ def latest_ingestion_date() -> str | None:
     return max(dates) if dates else None
 
 
-def read_bronze(source: str, dataset_id: str, ingestion_date: str) -> pd.DataFrame | None:
-    """Lit raw.parquet depuis MinIO bronze."""
-    key = f"ingestion_date={ingestion_date}/{source}/{dataset_id}/raw.parquet"
+def read_bronze(indicateur: str, dataset_id: str, ingestion_date: str) -> pd.DataFrame | None:
+    """Lit raw.parquet depuis MinIO bronze (partition par indicateur)."""
+    key = f"ingestion_date={ingestion_date}/{indicateur}/{dataset_id}/raw.parquet"
     try:
         obj = s3.get_object(Bucket=BUCKET_BRONZE, Key=key)
         df = pd.read_parquet(BytesIO(obj["Body"].read()))
@@ -217,11 +316,10 @@ def read_bronze(source: str, dataset_id: str, ingestion_date: str) -> pd.DataFra
 
 # ─── Writers ──────────────────────────────────────────────────────────────────
 
-def write_silver_minio(df: pd.DataFrame, dataset_id: str, source: str, ingestion_date: str):
+def write_silver_minio(df: pd.DataFrame, dataset_id: str, indicateur: str, ingestion_date: str):
     """Écrit le Parquet nettoyé dans MinIO bucket 'silver'."""
-    key = f"ingestion_date={ingestion_date}/{source}/{dataset_id}/clean.parquet"
+    key = f"ingestion_date={ingestion_date}/{indicateur}/{dataset_id}/clean.parquet"
     buf = BytesIO()
-    # location GeoJSON (dict) → JSON string pour compatibilité Parquet
     df_out = df.copy()
     if "location" in df_out.columns:
         df_out["location"] = df_out["location"].apply(
@@ -243,14 +341,21 @@ def write_silver_mongo(df: pd.DataFrame, collection_name: str, id_col: str | Non
         result = coll.bulk_write(ops, ordered=False)
         log.info(f"    ✓ MongoDB {collection_name} — upserted={result.upserted_count} modified={result.modified_count}")
     else:
-        coll.delete_many({"_ingested_at": records[0].get("_ingested_at")} if records else {})
-        coll.insert_many(records)
+        ingested_at = records[0].get("_ingested_at") if records else None
+        if ingested_at:
+            coll.delete_many({"_ingested_at": ingested_at})
+        if records:
+            coll.insert_many(records)
         log.info(f"    ✓ MongoDB {collection_name} — {len(records)} insérés")
 
     if "location" in df.columns:
-        coll.create_index([("location", "2dsphere")])
+        try:
+            coll.create_index([("location", "2dsphere")])
+        except Exception:
+            pass
     if "arrondissement" in df.columns:
         coll.create_index("arrondissement")
+    coll.create_index("_indicateur")
 
 
 # ─── Init ─────────────────────────────────────────────────────────────────────
@@ -276,27 +381,6 @@ def init_mongo():
         raise RuntimeError(f"MongoDB inaccessible — docker-compose up ? ({e})")
 
 
-# ─── Source map (dataset_id → source) ─────────────────────────────────────────
-# Reprend les valeurs du bronze_feeder DATASETS
-
-SOURCE_MAP = {
-    "ilots_fraicheur_espaces_verts": "paris_opendata",
-    "ilots_fraicheur_equipements":   "paris_opendata",
-    "arbres":                        "paris_opendata",
-    "qualite_air":                   "datagouv",
-    "fibre_actuel":                  "datagouv",
-    "fibre_base_imb":                "datagouv",
-    "fibre_base_imb_fc":             "datagouv",
-    "fibre_debit_filaire":           "datagouv",
-    "fibre_operateur":               "datagouv",
-    "sanisettes":                    "paris_opendata",
-    "trafic_routier":                "paris_opendata",
-    "chantiers":                     "paris_opendata",
-    "anomalies":                     "paris_opendata",
-    "zones_touristiques":            "paris_opendata",
-    "terrasses":                     "paris_opendata",
-}
-
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 def run(ingestion_date: str | None = None):
@@ -315,23 +399,29 @@ def run(ingestion_date: str | None = None):
 
     results = []
 
-    for dataset_id, (collection, transformer, id_col) in SILVER_CONFIG.items():
-        log.info(f"\n[{dataset_id}]")
-        source = SOURCE_MAP[dataset_id]
+    for dataset_id, (collection, transformer, id_col, indicateur) in SILVER_CONFIG.items():
+        log.info(f"\n[{indicateur.upper()}] [{dataset_id}]")
 
         try:
-            df = read_bronze(source, dataset_id, ingestion_date)
+            df = read_bronze(indicateur, dataset_id, ingestion_date)
             if df is None:
                 results.append({"id": dataset_id, "status": "SKIPPED (absent bronze)"})
                 continue
 
             df = transformer(df)
-            write_silver_minio(df, dataset_id, source, ingestion_date)
+
+            if df.empty:
+                log.warning(f"  DataFrame vide après transformation")
+                results.append({"id": dataset_id, "status": "VIDE après transform"})
+                continue
+
+            write_silver_minio(df, dataset_id, indicateur, ingestion_date)
             write_silver_mongo(df, collection, id_col)
 
             results.append({
                 "id": dataset_id,
                 "collection": collection,
+                "indicateur": indicateur,
                 "rows": len(df),
                 "status": "OK",
                 "has_geo": "location" in df.columns,
@@ -341,19 +431,18 @@ def run(ingestion_date: str | None = None):
             log.error(f"  ERREUR : {e}")
             results.append({"id": dataset_id, "status": f"ERREUR: {e}"})
 
-    # ── Rapport ────────────────────────────────────────────────────────────
     log.info(f"\n{'='*60}")
     log.info("RAPPORT SILVER")
     log.info(f"{'='*60}")
     ok = [r for r in results if r["status"] == "OK"]
-    ko = [r for r in results if r["status"] not in ("OK",) and not r["status"].startswith("SKIPPED")]
-    skipped = [r for r in results if r["status"].startswith("SKIPPED")]
+    ko = [r for r in results if r["status"] not in ("OK",) and not r["status"].startswith("SKIPPED") and not r["status"].startswith("VIDE")]
+    skipped = [r for r in results if r["status"].startswith("SKIPPED") or r["status"].startswith("VIDE")]
     log.info(f"  OK      : {len(ok)}/{len(results)}")
     for r in ok:
         geo_tag = " [geo]" if r.get("has_geo") else ""
-        log.info(f"    {r['id']:40} {r['rows']:>8} lignes  →  {r['collection']}{geo_tag}")
+        log.info(f"    [{r.get('indicateur','?'):20}] {r['id']:40} {r['rows']:>8}  →  {r['collection']}{geo_tag}")
     if skipped:
-        log.info(f"  SKIPPED : {len(skipped)}")
+        log.info(f"  SKIPPED/VIDE : {len(skipped)}")
         for r in skipped:
             log.info(f"    {r['id']} — {r['status']}")
     if ko:
