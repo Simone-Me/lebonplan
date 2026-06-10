@@ -104,6 +104,16 @@ def latlon_cols_to_geojson(lat_col, lon_col) -> list:
     return result
 
 
+def _rename_first_existing(df: pd.DataFrame, target: str, candidates: list[str]) -> pd.DataFrame:
+    """Renomme la première colonne trouvée parmi plusieurs alias vers un nom cible."""
+    if target in df.columns:
+        return df
+    for col in candidates:
+        if col in df.columns:
+            return df.rename(columns={col: target})
+    return df
+
+
 # ─── Base transformer ─────────────────────────────────────────────────────────
 
 def _base_geo(df: pd.DataFrame) -> pd.DataFrame:
@@ -224,7 +234,15 @@ def transform_idf_geo(df: pd.DataFrame) -> pd.DataFrame:
             if len(df) < before:
                 return df
 
-    # 3. Bbox géographique Paris (fallback)
+    # 3. Colonne ville/commune textuelle contenant "Paris" (ex: arrtown, town, ville)
+    for town_col in ["arrtown", "town", "ville", "city_name", "commune_name"]:
+        if town_col in df.columns:
+            mask = df[town_col].astype(str).str.contains("Paris", case=False, na=False)
+            df = df[mask]
+            if len(df) < before:
+                return df
+
+    # 4. Bbox géographique Paris (fallback)
     if "location" in df.columns:
         def in_paris(loc):
             if not isinstance(loc, dict):
@@ -237,6 +255,51 @@ def transform_idf_geo(df: pd.DataFrame) -> pd.DataFrame:
         df = df[df["location"].apply(in_paris)]
 
     return df
+
+
+def transform_idf_transport(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Datasets transport IDF : filtre Paris + schéma Silver minimal.
+    Normalise quelques alias fréquents pour éviter de conserver tout le payload Bronze.
+    """
+    df = transform_idf_geo(df)
+
+    aliases = {
+        "identifiant": ["id", "id_ref_zdl", "id_refa", "objectid", "stop_id", "stopareaid"],
+        "nom": ["nom", "nomlong", "nom_gare", "nom_arret", "libelle", "stopname", "name"],
+        "mode_transport": ["mode", "transportmode", "modeprincipa", "mode_principal", "type_arret", "type"],
+        "ligne": ["ligne", "nomligne", "res_com", "res_stif", "line"],
+        "commune": ["commune", "nom_commune", "nomcommune", "city"],
+        "code_postal": ["code_postal", "cp", "codepostal", "postal_code"],
+    }
+    for target, candidates in aliases.items():
+        df = _rename_first_existing(df, target, candidates)
+
+    keep = [
+        "identifiant", "nom", "mode_transport", "ligne",
+        "commune", "code_postal", "arrondissement", "location",
+        "_ingested_at", "_dataset_id", "_indicateur", "_signe", "_source",
+    ]
+    return df[[c for c in keep if c in df.columns]]
+
+
+def transform_velib(df: pd.DataFrame) -> pd.DataFrame:
+    """Velib : keep Paris stations only, fix coordonnees_geo dot-column conflict."""
+    if "nom_arrondissement_communes" in df.columns:
+        before = len(df)
+        df = df[df["nom_arrondissement_communes"] == "Paris"]
+        log.info(f"    Velib Paris filter: {before} → {len(df)} stations")
+
+    # The API flattens coordonnees_geo → two dot-named columns + a NaN parent.
+    # MongoDB $set conflicts when both the parent and a dotted subpath are present.
+    lon_col, lat_col = "coordonnees_geo.lon", "coordonnees_geo.lat"
+    if lon_col in df.columns and lat_col in df.columns and "location" not in df.columns:
+        df["location"] = latlon_cols_to_geojson(df[lat_col], df[lon_col])
+    drop_cols = [c for c in [lon_col, lat_col, "coordonnees_geo"] if c in df.columns]
+    if drop_cols:
+        df = df.drop(columns=drop_cols)
+
+    return _base_geo(df)
 
 
 def transform_passthrough(df: pd.DataFrame) -> pd.DataFrame:
@@ -284,9 +347,10 @@ SILVER_CONFIG = {
     "anomalies":                     ("silver_anomalies",          transform_api_geo,       None,            "qualite_vie"),
     "zones_touristiques":            ("silver_zones_touristiques", transform_api_geo,       None,            "qualite_vie"),
     # Transports
-    "comptage_multimodal":           ("silver_comptage_multimodal", transform_api_geo,      None,            "transports"),
-    "velib":                         ("silver_velib",              transform_api_geo,       "stationcode",   "transports"),
-    "gares":                         ("silver_gares",              transform_idf_geo,       None,            "transports"),
+    "voies":                         ("silver_voies",              transform_api_geo,       None,            "transports"),
+    "velib":                         ("silver_velib",              transform_velib,         "stationcode",   "transports"),
+    "gares":                         ("silver_gares",              transform_idf_transport, None,            "transports"),
+    "bus":                           ("silver_bus",                transform_idf_transport, None,            "transports"),
     # Loisirs
     "evenements_paris":              ("silver_evenements",         transform_api_geo,       None,            "loisirs"),
     "terrasses":                     ("silver_terrasses",          transform_api_geo,       None,            "loisirs"),
@@ -320,9 +384,10 @@ SOURCE_MAP = {
     "chantiers":                     "paris_opendata",
     "anomalies":                     "paris_opendata",
     "zones_touristiques":            "paris_opendata",
-    "comptage_multimodal":           "paris_opendata",
+    "voies":           "paris_opendata",
     "velib":                         "transport_gouv",
     "gares":                         "transport_gouv",
+    "bus":                           "transport_gouv",
     "evenements_paris":              "paris_opendata",
     "terrasses":                     "paris_opendata",
     "cinemas_idf":                   "idf_opendata",

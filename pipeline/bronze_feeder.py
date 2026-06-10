@@ -183,8 +183,8 @@ DATASETS = [
     # INDICATEUR 2 — TRANSPORTS
     # ══════════════════════════════════════════════════════════════════════════
     {
-        "id": "comptage_multimodal",
-        "label": "Comptages multimodaux permanents",
+        "id": "voies",
+        "label": "Comptages multimodaux des passage sur voies de vélo/trottinette/autobus",
         "indicateur": "transports",
         "signe": "positif",
         "source": "paris_opendata",
@@ -211,6 +211,17 @@ DATASETS = [
         "source": "transport_gouv",
         "api_base_url": "https://data.iledefrance-mobilites.fr/api/explore/v2.1/catalog/datasets",
         "api_dataset_id": "emplacement-des-gares-idf",
+        "api_max_records": 500,
+        "format_source": "api_idf",
+    },
+    {
+        "id": "bus",
+        "label": "Arret de bus — Île-de-France",
+        "indicateur": "transports",
+        "signe": "positif",
+        "source": "transport_gouv",
+        "api_base_url": "https://data.iledefrance-mobilites.fr/api/explore/v2.1/catalog/datasets",
+        "api_dataset_id": "arrets",
         "api_max_records": 500,
         "format_source": "api_idf",
     },
