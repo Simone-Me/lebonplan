@@ -3,7 +3,10 @@ from typing import Optional, List, Any
 
 
 class KPIs(BaseModel):
-    arrondissement: int
+    arrondissement: Optional[int] = None
+    quartier_id: Optional[str] = None
+    quartier_code: Optional[str] = None
+    nom: Optional[str] = None
     annee: int
 
     prix_m2_median: Optional[float] = None
@@ -21,9 +24,23 @@ class KPIs(BaseModel):
     nb_anomalies: Optional[int] = None
 
     score_transports: Optional[float] = None
+    score_transport_offre: Optional[float] = None
+    score_transport_intensite: Optional[float] = None
     nb_gares: Optional[int] = None
     nb_stations_velib: Optional[int] = None
-    flux_multimodal: Optional[int] = None
+    capacite_velib_totale: Optional[float] = None
+    nb_lignes_transport: Optional[int] = None
+    lignes_par_gare_moyen: Optional[float] = None
+    nb_modes_lourds: Optional[int] = None
+    nb_arrets_bus: Optional[int] = None
+    pct_arrets_accessibles: Optional[float] = None
+    flux_multimodal: Optional[float] = None
+    flux_velo_trott: Optional[float] = None
+    flux_bus: Optional[float] = None
+    flux_motorise: Optional[float] = None
+    pct_flux_velo_trott: Optional[float] = None
+    pct_flux_motorise: Optional[float] = None
+    pct_flux_voie_cyclable: Optional[float] = None
 
     score_loisirs: Optional[float] = None
     nb_evenements: Optional[int] = None
@@ -74,4 +91,12 @@ class TimelinePoint(BaseModel):
 
 class TimelineResponse(BaseModel):
     arrondissement: int
+    points: List[TimelinePoint]
+
+
+class QuartierTimelineResponse(BaseModel):
+    quartier_id: str
+    quartier_code: Optional[str] = None
+    arrondissement: Optional[int] = None
+    nom: Optional[str] = None
     points: List[TimelinePoint]

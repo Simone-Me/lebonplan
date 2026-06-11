@@ -12,6 +12,8 @@ Pour chaque arrondissement (1-20) :
 
 import logging
 import math
+import re
+import json
 import requests
 from pymongo import MongoClient
 from sqlalchemy import create_engine, text
@@ -22,6 +24,11 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 log = logging.getLogger("gold_aggregator")
 
 ARRONDISSEMENTS = list(range(1, 21))
+ARRONDISSEMENTS_GEO_URL = "https://opendata.paris.fr/api/explore/v2.1/catalog/datasets/arrondissements/exports/geojson?lang=fr&timezone=Europe%2FParis"
+QUARTIERS_GEO_URL = "https://opendata.paris.fr/api/explore/v2.1/catalog/datasets/quartier_paris/exports/geojson?lang=fr&timezone=Europe%2FParis"
+_QUARTIER_SHAPES = None
+_QUARTIER_BY_ID = None
+_QUARTIER_POINT_CACHE = {}
 
 # ─── Connexions ───────────────────────────────────────────────────────────────
 
@@ -73,7 +80,7 @@ def safe_get(d: dict, arr: int, default=0):
     return v if v is not None and not (isinstance(v, float) and math.isnan(v)) else default
 
 
-def weighted_avg(scored_pairs: list, skip_zero_collections: bool = True) -> dict:
+def weighted_avg(scored_pairs: list, zone_keys: list | None = None, skip_zero_collections: bool = True) -> dict:
     """
     Moyenne pondérée de sous-scores normalisés par arrondissement.
 
@@ -81,22 +88,228 @@ def weighted_avg(scored_pairs: list, skip_zero_collections: bool = True) -> dict
     skip_zero_collections : si True, ignore les collections où tous les arrondissements = 0
       (évite de pénaliser un arrondissement quand toute une source est vide)
     """
-    result = {arr: {"num": 0.0, "den": 0} for arr in ARRONDISSEMENTS}
+    if zone_keys is None:
+        zone_keys = sorted({key for scores, _ in scored_pairs for key in scores.keys()})
+    result = {zone: {"num": 0.0, "den": 0} for zone in zone_keys}
     for scores, poids in scored_pairs:
         if skip_zero_collections and all(v == 0 for v in scores.values()):
             continue
-        for arr in ARRONDISSEMENTS:
-            result[arr]["num"] += scores.get(arr, 0) * poids
-            result[arr]["den"] += poids
+        for zone in zone_keys:
+            result[zone]["num"] += scores.get(zone, 0) * poids
+            result[zone]["den"] += poids
     return {
-        arr: round(result[arr]["num"] / result[arr]["den"], 2) if result[arr]["den"] > 0 else 0.0
-        for arr in ARRONDISSEMENTS
+        zone: round(result[zone]["num"] / result[zone]["den"], 2) if result[zone]["den"] > 0 else 0.0
+        for zone in zone_keys
     }
 
 
 def invert(scores: dict) -> dict:
     """Inverse un dict de scores normalisés 0-100 → (100 - score)."""
     return {arr: round(100 - v, 2) for arr, v in scores.items()}
+
+
+def _first_present(props: dict, keys: list[str], default=None):
+    """Retourne la première propriété non vide trouvée parmi plusieurs alias."""
+    for key in keys:
+        value = props.get(key)
+        if value not in (None, ""):
+            return value
+    return default
+
+
+def _parse_arrondissement_number(value) -> int | None:
+    """Normalise une représentation d'arrondissement vers un entier 1-20."""
+    if value in (None, ""):
+        return None
+    s = str(value).strip()
+    m = re.match(r"^75[01](\d{2})$", s)
+    if m:
+        n = int(m.group(1))
+        return n if 1 <= n <= 20 else None
+    m = re.search(r"\b(\d{1,2})\b", s)
+    if m:
+        n = int(m.group(1))
+        return n if 1 <= n <= 20 else None
+    return None
+
+
+def _as_float(value, default: float = 0.0) -> float:
+    try:
+        if value is None:
+            return default
+        return float(value)
+    except Exception:
+        return default
+
+
+def _is_truthy(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    return str(value).strip().lower() in {"1", "true", "t", "yes", "oui", "vrai"}
+
+
+def _normalize_mode_label(value) -> str:
+    return str(value or "").strip().lower()
+
+
+def _is_active_heavy_mode(mode_label: str) -> bool:
+    label = _normalize_mode_label(mode_label)
+    return any(token in label for token in ("metro", "rer", "tram", "train", "val"))
+
+
+def _is_velo_or_trott_mode(mode_label: str) -> bool:
+    label = _normalize_mode_label(mode_label)
+    return any(token in label for token in ("velo", "vélo", "trott", "cycl"))
+
+
+def _is_bus_mode(mode_label: str) -> bool:
+    label = _normalize_mode_label(mode_label)
+    return "bus" in label
+
+
+def _is_motorized_mode(mode_label: str) -> bool:
+    label = _normalize_mode_label(mode_label)
+    return any(token in label for token in ("motor", "moto", "veh", "véh", "auto", "voiture", "car", "camion"))
+
+
+def _is_cycle_way(voie_label: str) -> bool:
+    label = _normalize_mode_label(voie_label)
+    return any(token in label for token in ("cycl", "velo", "vélo", "trott"))
+
+
+def _extract_polygon_rings(geometry: dict) -> list[list[list[float]]]:
+    """Extrait les anneaux externes d'une géométrie GeoJSON Polygon/MultiPolygon."""
+    if not isinstance(geometry, dict):
+        return []
+    gtype = geometry.get("type")
+    coords = geometry.get("coordinates", [])
+    if gtype == "Polygon":
+        return [coords[0]] if coords else []
+    if gtype == "MultiPolygon":
+        return [poly[0] for poly in coords if poly]
+    return []
+
+
+def _point_in_ring(lon: float, lat: float, ring: list[list[float]]) -> bool:
+    """Test de point-in-polygon simple par ray casting sur un anneau."""
+    inside = False
+    n = len(ring)
+    if n < 3:
+        return False
+    j = n - 1
+    for i in range(n):
+        xi, yi = ring[i][0], ring[i][1]
+        xj, yj = ring[j][0], ring[j][1]
+        intersects = ((yi > lat) != (yj > lat)) and (
+            lon < (xj - xi) * (lat - yi) / ((yj - yi) or 1e-12) + xi
+        )
+        if intersects:
+            inside = not inside
+        j = i
+    return inside
+
+
+def _load_quartier_shapes():
+    """Charge et met en cache les polygones et métadonnées des quartiers administratifs."""
+    global _QUARTIER_SHAPES, _QUARTIER_BY_ID
+    if _QUARTIER_SHAPES is not None and _QUARTIER_BY_ID is not None:
+        return _QUARTIER_SHAPES, _QUARTIER_BY_ID
+
+    shapes = []
+    quartiers_by_id = {}
+    try:
+        response = requests.get(QUARTIERS_GEO_URL, timeout=30)
+        response.raise_for_status()
+        geojson = response.json()
+        for feature in geojson.get("features", []):
+            props = feature.get("properties", {})
+            quartier_id = _first_present(props, [
+                "n_sq_qu", "id_quartier", "quartier_id", "c_qu", "code_qu",
+            ])
+            quartier_code = _first_present(props, [
+                "c_qu", "code_quartier", "code_qu", "quartier_code",
+            ], quartier_id)
+            nom = _first_present(props, [
+                "l_qu", "nom_quart", "nom_quartier", "quartier", "nom",
+            ])
+            arr_raw = _first_present(props, [
+                "c_ar", "arrondissement", "code_arrondissement", "c_arinsee", "arr_insee",
+            ])
+            arr_num = _parse_arrondissement_number(arr_raw)
+            rings = _extract_polygon_rings(feature.get("geometry", {}))
+
+            if not quartier_id:
+                quartier_id = quartier_code or nom
+            if not quartier_id or not nom or not rings:
+                continue
+
+            info = {
+                "quartier_id": str(quartier_id),
+                "quartier_code": str(quartier_code) if quartier_code is not None else None,
+                "arrondissement": arr_num,
+                "nom": str(nom),
+                "rings": rings,
+            }
+            shapes.append(info)
+            quartiers_by_id[info["quartier_id"]] = info
+    except Exception as exc:
+        log.warning(f"  Impossible de charger les polygones de quartiers pour l'agrégation fine : {exc}")
+        shapes = []
+        quartiers_by_id = {}
+
+    _QUARTIER_SHAPES = shapes
+    _QUARTIER_BY_ID = quartiers_by_id
+    return _QUARTIER_SHAPES, _QUARTIER_BY_ID
+
+
+def infer_quartier_from_location(location: dict | None) -> dict | None:
+    """Déduit le quartier administratif à partir d'un point GeoJSON WGS84."""
+    if not isinstance(location, dict):
+        return None
+    coords = location.get("coordinates", [])
+    if len(coords) != 2:
+        return None
+    try:
+        lon = float(coords[0])
+        lat = float(coords[1])
+    except Exception:
+        return None
+
+    cache_key = (round(lon, 6), round(lat, 6))
+    cached = _QUARTIER_POINT_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    quartiers, _ = _load_quartier_shapes()
+    for quartier in quartiers:
+        if any(_point_in_ring(lon, lat, ring) for ring in quartier["rings"]):
+            _QUARTIER_POINT_CACHE[cache_key] = quartier
+            return quartier
+
+    _QUARTIER_POINT_CACHE[cache_key] = None
+    return None
+
+
+def _resolve_quartier_meta(doc: dict) -> dict | None:
+    """Récupère les métadonnées quartier soit depuis le document, soit via le point géographique."""
+    _, quartiers_by_id = _load_quartier_shapes()
+    quartier_id = doc.get("quartier_id")
+    if quartier_id is not None:
+        quartier = quartiers_by_id.get(str(quartier_id))
+        if quartier is not None:
+            return quartier
+    return infer_quartier_from_location(doc.get("location"))
+
+
+def _count_by_quartier(coll, quartier_ids: list[str]) -> dict:
+    counts = {qid: 0 for qid in quartier_ids}
+    for doc in coll.find({}):
+        quartier = _resolve_quartier_meta(doc)
+        if quartier:
+            counts[quartier["quartier_id"]] += 1
+    return counts
 
 
 # ─── Agrégations par indicateur ───────────────────────────────────────────────
@@ -174,35 +387,185 @@ def agg_qualite_vie(db) -> dict:
 
 # Scoring Indicateur 2 — Transports
 #
-# Source              | Collection                  | Champ        | Poids | Signe
-# ------------------- | --------------------------- | ------------ | ----- | -----
-# Gares               | silver_gares                | COUNT        |   2   | +
-# Vélib stations      | silver_velib                | COUNT        |   2   | +
-# Flux multimodal     | silver_comptage_multimodal  | SUM(q)       |   1   | +
+# Formule retenue :
+#   score_transports = 0.6 * Offre + 0.4 * Intensite
+#
+# Offre :
+# - densité / nombre de stations Vélib
+# - capacité totale Vélib
+# - nombre de gares physiques
+# - nombre moyen de lignes par gare
+# - variété ferrée/lourde (metro, RER, tram, train, VAL)
+# - densité d'arrêts
+# - part d'arrêts accessibles quand disponible
+#
+# Intensité :
+# - flux total observé
+# - flux vélo / trottinette
+# - flux bus
+# - part de flux sur voies cyclables
+# - part motorisée (inversée)
 
 def agg_transports(db) -> dict:
-    gares = count_by_arr(db["silver_gares"])
-    velib = count_by_arr(db["silver_velib"])
-    flux  = {doc["_id"]: doc["flux"] for doc in db["silver_comptage_multimodal"].aggregate([
-        {"$match": {"arrondissement": {"$in": ARRONDISSEMENTS}}},
-        {"$group": {"_id": "$arrondissement", "flux": {"$sum": {"$ifNull": ["$q", 1]}}}},
-    ])}
-
-    result = {}
-    for arr in ARRONDISSEMENTS:
-        result[arr] = {
-            "nb_gares":          safe_get(gares, arr),
-            "nb_stations_velib": safe_get(velib, arr),
-            "flux_multimodal":   safe_get(flux, arr),
+    result = {
+        arr: {
+            "nb_stations_velib": 0,
+            "capacite_velib_totale": 0.0,
+            "nb_gares": 0,
+            "nb_lignes_transport": 0,
+            "lignes_par_gare_moyen": 0.0,
+            "nb_modes_lourds": 0,
+            "nb_arrets_bus": 0,
+            "pct_arrets_accessibles": 0.0,
+            "flux_multimodal": 0.0,
+            "flux_velo_trott": 0.0,
+            "flux_bus": 0.0,
+            "flux_motorise": 0.0,
+            "pct_flux_velo_trott": 0.0,
+            "pct_flux_motorise": 0.0,
+            "pct_flux_voie_cyclable": 0.0,
         }
+        for arr in ARRONDISSEMENTS
+    }
 
-    s_gar  = minmax_normalize({a: result[a]["nb_gares"]           for a in ARRONDISSEMENTS})
-    s_vel  = minmax_normalize({a: result[a]["nb_stations_velib"]  for a in ARRONDISSEMENTS})
-    s_flux = minmax_normalize({a: result[a]["flux_multimodal"]    for a in ARRONDISSEMENTS})
+    # Velib
+    for doc in db["silver_velib"].find({"arrondissement": {"$in": ARRONDISSEMENTS}}):
+        arr = doc.get("arrondissement")
+        if arr not in result:
+            continue
+        result[arr]["nb_stations_velib"] += 1
+        result[arr]["capacite_velib_totale"] += _as_float(doc.get("capacity"), 0.0)
 
-    scores = weighted_avg([(s_gar, 2), (s_vel, 2), (s_flux, 1)])
+    # Gares : dédoublonner la gare physique, mais mesurer aussi l'intensité de desserte.
+    gares_uniques = {arr: set() for arr in ARRONDISSEMENTS}
+    lignes_par_arr = {arr: set() for arr in ARRONDISSEMENTS}
+    modes_lourds_par_arr = {arr: set() for arr in ARRONDISSEMENTS}
+    for doc in db["silver_gares"].find({"arrondissement": {"$in": ARRONDISSEMENTS}}):
+        arr = doc.get("arrondissement")
+        if arr not in result:
+            continue
+        gare_id = doc.get("identifiant") or doc.get("nom")
+        ligne = doc.get("ligne")
+        mode = doc.get("mode_transport")
+        if gare_id:
+            gares_uniques[arr].add(str(gare_id))
+        if ligne not in (None, ""):
+            lignes_par_arr[arr].add(str(ligne))
+        if _is_active_heavy_mode(mode):
+            modes_lourds_par_arr[arr].add(_normalize_mode_label(mode))
+        for flag_name, canonical in [
+            ("termetro", "metro"),
+            ("terrer", "rer"),
+            ("tertram", "tram"),
+            ("tertrain", "train"),
+            ("terval", "val"),
+        ]:
+            if _is_truthy(doc.get(flag_name)):
+                modes_lourds_par_arr[arr].add(canonical)
+
     for arr in ARRONDISSEMENTS:
-        result[arr]["score_transports"] = scores[arr]
+        nb_gares = len(gares_uniques[arr])
+        nb_lignes = len(lignes_par_arr[arr])
+        result[arr]["nb_gares"] = nb_gares
+        result[arr]["nb_lignes_transport"] = nb_lignes
+        result[arr]["lignes_par_gare_moyen"] = round(nb_lignes / nb_gares, 2) if nb_gares else 0.0
+        result[arr]["nb_modes_lourds"] = len(modes_lourds_par_arr[arr])
+
+    # Arrêts : maillage fin + accessibilité
+    arrets_total = {arr: 0 for arr in ARRONDISSEMENTS}
+    arrets_accessibles = {arr: 0 for arr in ARRONDISSEMENTS}
+    for doc in db["silver_bus"].find({"arrondissement": {"$in": ARRONDISSEMENTS}}):
+        arr = doc.get("arrondissement")
+        if arr not in result:
+            continue
+        arrets_total[arr] += 1
+        if _is_truthy(doc.get("accessible")):
+            arrets_accessibles[arr] += 1
+    for arr in ARRONDISSEMENTS:
+        result[arr]["nb_arrets_bus"] = arrets_total[arr]
+        result[arr]["pct_arrets_accessibles"] = round(
+            arrets_accessibles[arr] / arrets_total[arr] * 100, 2
+        ) if arrets_total[arr] else 0.0
+
+    # Comptages : intensité d'usage observée
+    flux_collection = db["silver_voies"]
+    if flux_collection.count_documents({}) == 0:
+        flux_collection = db["silver_comptage_multimodal"]
+
+    flux_total = {arr: 0.0 for arr in ARRONDISSEMENTS}
+    flux_velo = {arr: 0.0 for arr in ARRONDISSEMENTS}
+    flux_bus = {arr: 0.0 for arr in ARRONDISSEMENTS}
+    flux_motorise = {arr: 0.0 for arr in ARRONDISSEMENTS}
+    flux_cycle_way = {arr: 0.0 for arr in ARRONDISSEMENTS}
+
+    for doc in flux_collection.find({"arrondissement": {"$in": ARRONDISSEMENTS}}):
+        arr = doc.get("arrondissement")
+        if arr not in result:
+            continue
+        volume = _as_float(doc.get("nb_usagers"), None)
+        if volume is None:
+            volume = _as_float(doc.get("q"), 1.0)
+        mode_label = doc.get("mode")
+        voie_label = doc.get("voie")
+
+        flux_total[arr] += volume
+        if _is_velo_or_trott_mode(mode_label):
+            flux_velo[arr] += volume
+        if _is_bus_mode(mode_label):
+            flux_bus[arr] += volume
+        if _is_motorized_mode(mode_label):
+            flux_motorise[arr] += volume
+        if _is_cycle_way(voie_label):
+            flux_cycle_way[arr] += volume
+
+    for arr in ARRONDISSEMENTS:
+        total = flux_total[arr]
+        result[arr]["flux_multimodal"] = int(round(total))
+        result[arr]["flux_velo_trott"] = int(round(flux_velo[arr]))
+        result[arr]["flux_bus"] = int(round(flux_bus[arr]))
+        result[arr]["flux_motorise"] = int(round(flux_motorise[arr]))
+        result[arr]["pct_flux_velo_trott"] = round(flux_velo[arr] / total * 100, 2) if total else 0.0
+        result[arr]["pct_flux_motorise"] = round(flux_motorise[arr] / total * 100, 2) if total else 0.0
+        result[arr]["pct_flux_voie_cyclable"] = round(flux_cycle_way[arr] / total * 100, 2) if total else 0.0
+
+    # Offre
+    s_velib_stations = minmax_normalize({a: result[a]["nb_stations_velib"] for a in ARRONDISSEMENTS})
+    s_velib_cap = minmax_normalize({a: result[a]["capacite_velib_totale"] for a in ARRONDISSEMENTS})
+    s_gares = minmax_normalize({a: result[a]["nb_gares"] for a in ARRONDISSEMENTS})
+    s_lignes = minmax_normalize({a: result[a]["lignes_par_gare_moyen"] for a in ARRONDISSEMENTS})
+    s_modes = minmax_normalize({a: result[a]["nb_modes_lourds"] for a in ARRONDISSEMENTS})
+    s_arrets = minmax_normalize({a: result[a]["nb_arrets_bus"] for a in ARRONDISSEMENTS})
+    s_access = minmax_normalize({a: result[a]["pct_arrets_accessibles"] for a in ARRONDISSEMENTS})
+
+    score_offre = weighted_avg([
+        (s_velib_stations, 1),
+        (s_velib_cap, 2),
+        (s_gares, 2),
+        (s_lignes, 2),
+        (s_modes, 1),
+        (s_arrets, 2),
+        (s_access, 1),
+    ])
+
+    # Intensité
+    s_flux_total = minmax_normalize({a: result[a]["flux_multimodal"] for a in ARRONDISSEMENTS})
+    s_flux_velo = minmax_normalize({a: result[a]["flux_velo_trott"] for a in ARRONDISSEMENTS})
+    s_flux_bus = minmax_normalize({a: result[a]["flux_bus"] for a in ARRONDISSEMENTS})
+    s_flux_cycle = minmax_normalize({a: result[a]["pct_flux_voie_cyclable"] for a in ARRONDISSEMENTS})
+    s_flux_motor = invert(minmax_normalize({a: result[a]["pct_flux_motorise"] for a in ARRONDISSEMENTS}))
+
+    score_intensite = weighted_avg([
+        (s_flux_total, 2),
+        (s_flux_velo, 1),
+        (s_flux_bus, 1),
+        (s_flux_cycle, 1),
+        (s_flux_motor, 1),
+    ])
+
+    for arr in ARRONDISSEMENTS:
+        result[arr]["score_transport_offre"] = score_offre[arr]
+        result[arr]["score_transport_intensite"] = score_intensite[arr]
+        result[arr]["score_transports"] = round(score_offre[arr] * 0.6 + score_intensite[arr] * 0.4, 2)
 
     return result
 
@@ -319,14 +682,339 @@ def agg_immobilier(db, annee: int) -> dict:
     return result
 
 
+def agg_quartiers(db, annee: int, arrondissement_kpis: dict) -> dict:
+    """
+    Recalcule les KPI à l'échelle des 80 quartiers administratifs.
+
+    Logique :
+    - toutes les sources Silver ponctuelles sont affectées à un quartier via `location`
+    - les métriques purement agrégées au niveau arrondissement (ex. DVF) sont héritées
+    - le score global reste la moyenne des 4 scores composites
+    """
+    quartiers, quartiers_by_id = _load_quartier_shapes()
+    quartier_ids = [q["quartier_id"] for q in quartiers]
+    if not quartier_ids:
+        log.warning("  Impossible de calculer gold.quartier_kpis : aucun quartier chargé")
+        return {}
+
+    result = {
+        qid: {
+            "quartier_id": qid,
+            "quartier_code": quartiers_by_id[qid]["quartier_code"],
+            "arrondissement": quartiers_by_id[qid]["arrondissement"],
+            "nom": quartiers_by_id[qid]["nom"],
+            "prix_m2_median": None,
+            "pct_logements_sociaux": None,
+            "nb_logements_sociaux": 0,
+            "score_qualite_vie": 0.0,
+            "nb_espaces_verts": 0,
+            "nb_arbres": 0,
+            "score_air_no2": None,
+            "score_air_pm25": None,
+            "pct_fibre": 0.0,
+            "nb_sanisettes": 0,
+            "nb_chantiers_actifs": 0,
+            "nb_anomalies": 0,
+            "score_transports": 0.0,
+            "score_transport_offre": 0.0,
+            "score_transport_intensite": 0.0,
+            "nb_gares": 0,
+            "nb_stations_velib": 0,
+            "capacite_velib_totale": 0.0,
+            "nb_lignes_transport": 0,
+            "lignes_par_gare_moyen": 0.0,
+            "nb_modes_lourds": 0,
+            "nb_arrets_bus": 0,
+            "pct_arrets_accessibles": 0.0,
+            "flux_multimodal": 0.0,
+            "flux_velo_trott": 0.0,
+            "flux_bus": 0.0,
+            "flux_motorise": 0.0,
+            "pct_flux_velo_trott": 0.0,
+            "pct_flux_motorise": 0.0,
+            "pct_flux_voie_cyclable": 0.0,
+            "score_loisirs": 0.0,
+            "nb_evenements": 0,
+            "nb_cinemas": 0,
+            "nb_terrasses": 0,
+            "nb_musees": 0,
+            "score_services": 0.0,
+            "nb_ecoles": 0,
+            "nb_maternelles": 0,
+            "nb_colleges": 0,
+            "nb_bibliotheques": 0,
+            "nb_bureaux_poste": 0,
+            "nb_ensup": 0,
+            "score_global": 0.0,
+        }
+        for qid in quartier_ids
+    }
+
+    # Héritage arrondissement pour les métriques non distribuables précisément
+    for qid in quartier_ids:
+        arr = result[qid]["arrondissement"]
+        arr_row = arrondissement_kpis.get(arr, {})
+        result[qid]["prix_m2_median"] = arr_row.get("prix_m2_median")
+        result[qid]["pct_logements_sociaux"] = arr_row.get("pct_logements_sociaux")
+        result[qid]["score_air_no2"] = arr_row.get("score_air_no2")
+        result[qid]["score_air_pm25"] = arr_row.get("score_air_pm25")
+
+    # Qualité de vie
+    for field, coll_name in [
+        ("nb_espaces_verts", "silver_espaces_verts"),
+        ("nb_arbres", "silver_arbres"),
+        ("nb_sanisettes", "silver_sanisettes"),
+        ("nb_chantiers_actifs", "silver_chantiers"),
+        ("nb_anomalies", "silver_anomalies"),
+    ]:
+        counts = _count_by_quartier(db[coll_name], quartier_ids)
+        for qid in quartier_ids:
+            result[qid][field] = counts[qid]
+
+    fibre_total = {qid: 0 for qid in quartier_ids}
+    fibre_deployes = {qid: 0 for qid in quartier_ids}
+    for doc in db["silver_fibre_imb"].find({}):
+        quartier = _resolve_quartier_meta(doc)
+        if not quartier:
+            continue
+        qid = quartier["quartier_id"]
+        fibre_total[qid] += 1
+        if re.search(r"d[ée]ploy", str(doc.get("statut_immeuble", "")), flags=re.IGNORECASE):
+            fibre_deployes[qid] += 1
+    for qid in quartier_ids:
+        total = fibre_total[qid]
+        result[qid]["pct_fibre"] = round(fibre_deployes[qid] / total * 100, 1) if total else 0.0
+
+    air_no2 = {
+        qid: min(_as_float(result[qid]["score_air_no2"], 0.0), 100.0)
+        for qid in quartier_ids
+    }
+
+    s_ev = minmax_normalize({qid: result[qid]["nb_espaces_verts"] for qid in quartier_ids})
+    s_arb = minmax_normalize({qid: result[qid]["nb_arbres"] for qid in quartier_ids})
+    s_san = minmax_normalize({qid: result[qid]["nb_sanisettes"] for qid in quartier_ids})
+    s_fib = minmax_normalize({qid: result[qid]["pct_fibre"] for qid in quartier_ids})
+    s_cha = invert(minmax_normalize({qid: result[qid]["nb_chantiers_actifs"] for qid in quartier_ids}))
+    s_ano = invert(minmax_normalize({qid: result[qid]["nb_anomalies"] for qid in quartier_ids}))
+    s_air = invert(air_no2)
+
+    score_qv = weighted_avg([
+        (s_ev, 2),
+        (s_arb, 1),
+        (s_san, 1),
+        (s_fib, 1),
+        (s_cha, 1),
+        (s_ano, 1),
+        (s_air, 1),
+    ], zone_keys=quartier_ids)
+    for qid in quartier_ids:
+        result[qid]["score_qualite_vie"] = score_qv[qid]
+
+    # Transports
+    gares_uniques = {qid: set() for qid in quartier_ids}
+    lignes_par_quartier = {qid: set() for qid in quartier_ids}
+    modes_lourds_par_quartier = {qid: set() for qid in quartier_ids}
+    arrets_total = {qid: 0 for qid in quartier_ids}
+    arrets_accessibles = {qid: 0 for qid in quartier_ids}
+    flux_total = {qid: 0.0 for qid in quartier_ids}
+    flux_velo = {qid: 0.0 for qid in quartier_ids}
+    flux_bus = {qid: 0.0 for qid in quartier_ids}
+    flux_motorise = {qid: 0.0 for qid in quartier_ids}
+    flux_cycle_way = {qid: 0.0 for qid in quartier_ids}
+
+    for doc in db["silver_velib"].find({}):
+        quartier = _resolve_quartier_meta(doc)
+        if not quartier:
+            continue
+        qid = quartier["quartier_id"]
+        result[qid]["nb_stations_velib"] += 1
+        result[qid]["capacite_velib_totale"] += _as_float(doc.get("capacity"), 0.0)
+
+    for doc in db["silver_gares"].find({}):
+        quartier = _resolve_quartier_meta(doc)
+        if not quartier:
+            continue
+        qid = quartier["quartier_id"]
+        gare_id = doc.get("identifiant") or doc.get("nom")
+        ligne = doc.get("ligne")
+        mode = doc.get("mode_transport")
+        if gare_id not in (None, ""):
+            gares_uniques[qid].add(str(gare_id))
+        if ligne not in (None, ""):
+            lignes_par_quartier[qid].add(str(ligne))
+        if _is_active_heavy_mode(mode):
+            modes_lourds_par_quartier[qid].add(_normalize_mode_label(mode))
+        for flag_name, canonical in [
+            ("termetro", "metro"),
+            ("terrer", "rer"),
+            ("tertram", "tram"),
+            ("tertrain", "train"),
+            ("terval", "val"),
+        ]:
+            if _is_truthy(doc.get(flag_name)):
+                modes_lourds_par_quartier[qid].add(canonical)
+
+    for qid in quartier_ids:
+        nb_gares = len(gares_uniques[qid])
+        nb_lignes = len(lignes_par_quartier[qid])
+        result[qid]["nb_gares"] = nb_gares
+        result[qid]["nb_lignes_transport"] = nb_lignes
+        result[qid]["lignes_par_gare_moyen"] = round(nb_lignes / nb_gares, 2) if nb_gares else 0.0
+        result[qid]["nb_modes_lourds"] = len(modes_lourds_par_quartier[qid])
+
+    for doc in db["silver_bus"].find({}):
+        quartier = _resolve_quartier_meta(doc)
+        if not quartier:
+            continue
+        qid = quartier["quartier_id"]
+        arrets_total[qid] += 1
+        if _is_truthy(doc.get("accessible")):
+            arrets_accessibles[qid] += 1
+    for qid in quartier_ids:
+        result[qid]["nb_arrets_bus"] = arrets_total[qid]
+        result[qid]["pct_arrets_accessibles"] = round(
+            arrets_accessibles[qid] / arrets_total[qid] * 100, 2
+        ) if arrets_total[qid] else 0.0
+
+    flux_collection = db["silver_voies"]
+    if flux_collection.count_documents({}) == 0:
+        flux_collection = db["silver_comptage_multimodal"]
+
+    for doc in flux_collection.find({}):
+        quartier = _resolve_quartier_meta(doc)
+        if not quartier:
+            continue
+        qid = quartier["quartier_id"]
+        volume = _as_float(doc.get("nb_usagers"), None)
+        if volume is None:
+            volume = _as_float(doc.get("q"), 1.0)
+        mode_label = doc.get("mode")
+        voie_label = doc.get("voie")
+
+        flux_total[qid] += volume
+        if _is_velo_or_trott_mode(mode_label):
+            flux_velo[qid] += volume
+        if _is_bus_mode(mode_label):
+            flux_bus[qid] += volume
+        if _is_motorized_mode(mode_label):
+            flux_motorise[qid] += volume
+        if _is_cycle_way(voie_label):
+            flux_cycle_way[qid] += volume
+
+    for qid in quartier_ids:
+        total = flux_total[qid]
+        result[qid]["flux_multimodal"] = int(round(total))
+        result[qid]["flux_velo_trott"] = int(round(flux_velo[qid]))
+        result[qid]["flux_bus"] = int(round(flux_bus[qid]))
+        result[qid]["flux_motorise"] = int(round(flux_motorise[qid]))
+        result[qid]["pct_flux_velo_trott"] = round(flux_velo[qid] / total * 100, 2) if total else 0.0
+        result[qid]["pct_flux_motorise"] = round(flux_motorise[qid] / total * 100, 2) if total else 0.0
+        result[qid]["pct_flux_voie_cyclable"] = round(flux_cycle_way[qid] / total * 100, 2) if total else 0.0
+
+    s_velib_stations = minmax_normalize({qid: result[qid]["nb_stations_velib"] for qid in quartier_ids})
+    s_velib_cap = minmax_normalize({qid: result[qid]["capacite_velib_totale"] for qid in quartier_ids})
+    s_gares = minmax_normalize({qid: result[qid]["nb_gares"] for qid in quartier_ids})
+    s_lignes = minmax_normalize({qid: result[qid]["lignes_par_gare_moyen"] for qid in quartier_ids})
+    s_modes = minmax_normalize({qid: result[qid]["nb_modes_lourds"] for qid in quartier_ids})
+    s_arrets = minmax_normalize({qid: result[qid]["nb_arrets_bus"] for qid in quartier_ids})
+    s_access = minmax_normalize({qid: result[qid]["pct_arrets_accessibles"] for qid in quartier_ids})
+
+    score_offre = weighted_avg([
+        (s_velib_stations, 1),
+        (s_velib_cap, 2),
+        (s_gares, 2),
+        (s_lignes, 2),
+        (s_modes, 1),
+        (s_arrets, 2),
+        (s_access, 1),
+    ], zone_keys=quartier_ids)
+
+    s_flux_total = minmax_normalize({qid: result[qid]["flux_multimodal"] for qid in quartier_ids})
+    s_flux_velo = minmax_normalize({qid: result[qid]["flux_velo_trott"] for qid in quartier_ids})
+    s_flux_bus = minmax_normalize({qid: result[qid]["flux_bus"] for qid in quartier_ids})
+    s_flux_cycle = minmax_normalize({qid: result[qid]["pct_flux_voie_cyclable"] for qid in quartier_ids})
+    s_flux_motor = invert(minmax_normalize({qid: result[qid]["pct_flux_motorise"] for qid in quartier_ids}))
+
+    score_intensite = weighted_avg([
+        (s_flux_total, 2),
+        (s_flux_velo, 1),
+        (s_flux_bus, 1),
+        (s_flux_cycle, 1),
+        (s_flux_motor, 1),
+    ], zone_keys=quartier_ids)
+
+    for qid in quartier_ids:
+        result[qid]["score_transport_offre"] = score_offre[qid]
+        result[qid]["score_transport_intensite"] = score_intensite[qid]
+        result[qid]["score_transports"] = round(score_offre[qid] * 0.6 + score_intensite[qid] * 0.4, 2)
+
+    # Loisirs
+    for field, coll_name in [
+        ("nb_evenements", "silver_evenements"),
+        ("nb_terrasses", "silver_terrasses"),
+        ("nb_cinemas", "silver_cinemas"),
+        ("nb_musees", "silver_musees"),
+    ]:
+        counts = _count_by_quartier(db[coll_name], quartier_ids)
+        for qid in quartier_ids:
+            result[qid][field] = counts[qid]
+
+    s_evt = minmax_normalize({qid: result[qid]["nb_evenements"] for qid in quartier_ids})
+    s_ter = minmax_normalize({qid: result[qid]["nb_terrasses"] for qid in quartier_ids})
+    s_cin = minmax_normalize({qid: result[qid]["nb_cinemas"] for qid in quartier_ids})
+    s_mus = minmax_normalize({qid: result[qid]["nb_musees"] for qid in quartier_ids})
+    score_loisirs = weighted_avg([(s_evt, 2), (s_ter, 1), (s_cin, 1), (s_mus, 1)], zone_keys=quartier_ids)
+    for qid in quartier_ids:
+        result[qid]["score_loisirs"] = score_loisirs[qid]
+
+    # Services publics
+    for field, coll_name in [
+        ("nb_ecoles", "silver_ecoles_elem"),
+        ("nb_maternelles", "silver_maternelles"),
+        ("nb_colleges", "silver_colleges"),
+        ("nb_bibliotheques", "silver_bibliotheques"),
+        ("nb_bureaux_poste", "silver_bureaux_poste"),
+        ("nb_ensup", "silver_ensup"),
+        ("nb_logements_sociaux", "silver_logements_sociaux"),
+    ]:
+        counts = _count_by_quartier(db[coll_name], quartier_ids)
+        for qid in quartier_ids:
+            result[qid][field] = counts[qid]
+
+    s_eco = minmax_normalize({qid: result[qid]["nb_ecoles"] for qid in quartier_ids})
+    s_mat = minmax_normalize({qid: result[qid]["nb_maternelles"] for qid in quartier_ids})
+    s_col = minmax_normalize({qid: result[qid]["nb_colleges"] for qid in quartier_ids})
+    s_bib = minmax_normalize({qid: result[qid]["nb_bibliotheques"] for qid in quartier_ids})
+    s_pos = minmax_normalize({qid: result[qid]["nb_bureaux_poste"] for qid in quartier_ids})
+    s_ens = minmax_normalize({qid: result[qid]["nb_ensup"] for qid in quartier_ids})
+    score_services = weighted_avg([
+        (s_eco, 2),
+        (s_mat, 2),
+        (s_col, 1),
+        (s_bib, 2),
+        (s_pos, 1),
+        (s_ens, 1),
+    ], zone_keys=quartier_ids)
+    for qid in quartier_ids:
+        result[qid]["score_services"] = score_services[qid]
+
+    for qid in quartier_ids:
+        s_qv = result[qid]["score_qualite_vie"] or 0
+        s_tr = result[qid]["score_transports"] or 0
+        s_lo = result[qid]["score_loisirs"] or 0
+        s_sv = result[qid]["score_services"] or 0
+        result[qid]["score_global"] = round((s_qv + s_tr + s_lo + s_sv) / 4, 2)
+
+    return result
+
+
 # ─── Géométries arrondissements ───────────────────────────────────────────────
 
 def load_arrondissements_geo(engine):
     """Télécharge et insère le GeoJSON des arrondissements depuis parisdata."""
-    url = "https://opendata.paris.fr/api/explore/v2.1/catalog/datasets/arrondissements/exports/geojson?lang=fr&timezone=Europe%2FParis"
     log.info(f"  Téléchargement GeoJSON arrondissements...")
     try:
-        r = requests.get(url, timeout=30)
+        r = requests.get(ARRONDISSEMENTS_GEO_URL, timeout=30)
         r.raise_for_status()
         geojson = r.json()
     except Exception as e:
@@ -339,10 +1027,7 @@ def load_arrondissements_geo(engine):
         arr_num = None
         for k in ["c_ar", "c_arinsee", "l_ar", "arrondissement"]:
             if k in props:
-                try:
-                    arr_num = int(str(props[k]).replace("e", "").replace("er", "").strip())
-                except Exception:
-                    pass
+                arr_num = _parse_arrondissement_number(props[k])
                 if arr_num:
                     break
         if not arr_num or not (1 <= arr_num <= 20):
@@ -370,6 +1055,74 @@ def load_arrondissements_geo(engine):
     log.info(f"  ✓ {len(rows)} géométries arrondissements upsertées")
 
 
+def load_quartiers_geo(engine):
+    """
+    Télécharge et insère le GeoJSON des 80 quartiers administratifs.
+    """
+    log.info("  Téléchargement GeoJSON quartiers administratifs...")
+    try:
+        r = requests.get(QUARTIERS_GEO_URL, timeout=30)
+        r.raise_for_status()
+        geojson = r.json()
+    except Exception as e:
+        log.warning(f"  Impossible de récupérer le GeoJSON quartiers : {e}")
+        return
+
+    rows = []
+    for feature in geojson.get("features", []):
+        props = feature.get("properties", {})
+
+        quartier_id = _first_present(props, [
+            "n_sq_qu", "id_quartier", "quartier_id", "c_qu", "code_qu",
+        ])
+        quartier_code = _first_present(props, [
+            "c_qu", "code_quartier", "code_qu", "quartier_code",
+        ], quartier_id)
+        nom = _first_present(props, [
+            "l_qu", "nom_quart", "nom_quartier", "quartier", "nom",
+        ])
+        arr_raw = _first_present(props, [
+            "c_ar", "arrondissement", "code_arrondissement", "c_arinsee", "arr_insee",
+        ])
+        arr_num = _parse_arrondissement_number(arr_raw)
+
+        if not quartier_id:
+            quartier_id = quartier_code or nom
+        if not quartier_id or not nom or not feature.get("geometry"):
+            continue
+
+        geom_str = json.dumps(feature["geometry"])
+        rows.append((str(quartier_id), str(quartier_code) if quartier_code is not None else None, arr_num, str(nom), geom_str))
+
+    if not rows:
+        log.warning("  Aucune géométrie quartier extraite du GeoJSON")
+        return
+
+    upsert_sql = text("""
+        INSERT INTO gold.quartiers_geo (quartier_id, quartier_code, arrondissement, nom, geom)
+        VALUES (:quartier_id, :quartier_code, :arrondissement, :nom, ST_SetSRID(ST_GeomFromGeoJSON(:geom), 4326))
+        ON CONFLICT (quartier_id) DO UPDATE
+          SET quartier_code  = EXCLUDED.quartier_code,
+              arrondissement = EXCLUDED.arrondissement,
+              nom            = EXCLUDED.nom,
+              geom           = EXCLUDED.geom
+    """)
+    with engine.connect() as conn:
+        for quartier_id, quartier_code, arr_num, nom, geom_str in rows:
+            conn.execute(
+                upsert_sql,
+                {
+                    "quartier_id": quartier_id,
+                    "quartier_code": quartier_code,
+                    "arrondissement": arr_num,
+                    "nom": nom,
+                    "geom": geom_str,
+                },
+            )
+        conn.commit()
+    log.info(f"  ✓ {len(rows)} géométries quartiers upsertées")
+
+
 # ─── Upsert Gold ──────────────────────────────────────────────────────────────
 
 def upsert_kpis(engine, kpis_by_arr: dict, annee: int):
@@ -380,7 +1133,11 @@ def upsert_kpis(engine, kpis_by_arr: dict, annee: int):
             score_qualite_vie, nb_espaces_verts, nb_arbres,
             score_air_no2, score_air_pm25, pct_fibre,
             nb_sanisettes, nb_chantiers_actifs, nb_anomalies,
-            score_transports, nb_gares, nb_stations_velib, flux_multimodal,
+            score_transports, score_transport_offre, score_transport_intensite,
+            nb_gares, nb_stations_velib, capacite_velib_totale, nb_lignes_transport,
+            lignes_par_gare_moyen, nb_modes_lourds, nb_arrets_bus, pct_arrets_accessibles,
+            flux_multimodal, flux_velo_trott, flux_bus, flux_motorise,
+            pct_flux_velo_trott, pct_flux_motorise, pct_flux_voie_cyclable,
             score_loisirs, nb_evenements, nb_cinemas, nb_terrasses, nb_musees,
             score_services, nb_ecoles, nb_maternelles, nb_colleges, nb_bibliotheques,
             nb_bureaux_poste, nb_ensup,
@@ -391,7 +1148,11 @@ def upsert_kpis(engine, kpis_by_arr: dict, annee: int):
             :score_qualite_vie, :nb_espaces_verts, :nb_arbres,
             :score_air_no2, :score_air_pm25, :pct_fibre,
             :nb_sanisettes, :nb_chantiers_actifs, :nb_anomalies,
-            :score_transports, :nb_gares, :nb_stations_velib, :flux_multimodal,
+            :score_transports, :score_transport_offre, :score_transport_intensite,
+            :nb_gares, :nb_stations_velib, :capacite_velib_totale, :nb_lignes_transport,
+            :lignes_par_gare_moyen, :nb_modes_lourds, :nb_arrets_bus, :pct_arrets_accessibles,
+            :flux_multimodal, :flux_velo_trott, :flux_bus, :flux_motorise,
+            :pct_flux_velo_trott, :pct_flux_motorise, :pct_flux_voie_cyclable,
             :score_loisirs, :nb_evenements, :nb_cinemas, :nb_terrasses, :nb_musees,
             :score_services, :nb_ecoles, :nb_maternelles, :nb_colleges, :nb_bibliotheques,
             :nb_bureaux_poste, :nb_ensup,
@@ -411,9 +1172,23 @@ def upsert_kpis(engine, kpis_by_arr: dict, annee: int):
             nb_chantiers_actifs   = EXCLUDED.nb_chantiers_actifs,
             nb_anomalies          = EXCLUDED.nb_anomalies,
             score_transports      = EXCLUDED.score_transports,
+            score_transport_offre = EXCLUDED.score_transport_offre,
+            score_transport_intensite = EXCLUDED.score_transport_intensite,
             nb_gares              = EXCLUDED.nb_gares,
             nb_stations_velib     = EXCLUDED.nb_stations_velib,
+            capacite_velib_totale = EXCLUDED.capacite_velib_totale,
+            nb_lignes_transport   = EXCLUDED.nb_lignes_transport,
+            lignes_par_gare_moyen = EXCLUDED.lignes_par_gare_moyen,
+            nb_modes_lourds       = EXCLUDED.nb_modes_lourds,
+            nb_arrets_bus         = EXCLUDED.nb_arrets_bus,
+            pct_arrets_accessibles = EXCLUDED.pct_arrets_accessibles,
             flux_multimodal       = EXCLUDED.flux_multimodal,
+            flux_velo_trott       = EXCLUDED.flux_velo_trott,
+            flux_bus              = EXCLUDED.flux_bus,
+            flux_motorise         = EXCLUDED.flux_motorise,
+            pct_flux_velo_trott   = EXCLUDED.pct_flux_velo_trott,
+            pct_flux_motorise     = EXCLUDED.pct_flux_motorise,
+            pct_flux_voie_cyclable = EXCLUDED.pct_flux_voie_cyclable,
             score_loisirs         = EXCLUDED.score_loisirs,
             nb_evenements         = EXCLUDED.nb_evenements,
             nb_cinemas            = EXCLUDED.nb_cinemas,
@@ -436,10 +1211,100 @@ def upsert_kpis(engine, kpis_by_arr: dict, annee: int):
     log.info(f"  ✓ {len(kpis_by_arr)} arrondissements upsertés (annee={annee})")
 
 
+def upsert_quartier_kpis(engine, kpis_by_quartier: dict, annee: int):
+    sql = text("""
+        INSERT INTO gold.quartier_kpis (
+            quartier_id, quartier_code, arrondissement, nom, annee,
+            prix_m2_median, pct_logements_sociaux, nb_logements_sociaux,
+            score_qualite_vie, nb_espaces_verts, nb_arbres,
+            score_air_no2, score_air_pm25, pct_fibre,
+            nb_sanisettes, nb_chantiers_actifs, nb_anomalies,
+            score_transports, score_transport_offre, score_transport_intensite,
+            nb_gares, nb_stations_velib, capacite_velib_totale, nb_lignes_transport,
+            lignes_par_gare_moyen, nb_modes_lourds, nb_arrets_bus, pct_arrets_accessibles,
+            flux_multimodal, flux_velo_trott, flux_bus, flux_motorise,
+            pct_flux_velo_trott, pct_flux_motorise, pct_flux_voie_cyclable,
+            score_loisirs, nb_evenements, nb_cinemas, nb_terrasses, nb_musees,
+            score_services, nb_ecoles, nb_maternelles, nb_colleges, nb_bibliotheques,
+            nb_bureaux_poste, nb_ensup,
+            score_global
+        ) VALUES (
+            :quartier_id, :quartier_code, :arrondissement, :nom, :annee,
+            :prix_m2_median, :pct_logements_sociaux, :nb_logements_sociaux,
+            :score_qualite_vie, :nb_espaces_verts, :nb_arbres,
+            :score_air_no2, :score_air_pm25, :pct_fibre,
+            :nb_sanisettes, :nb_chantiers_actifs, :nb_anomalies,
+            :score_transports, :score_transport_offre, :score_transport_intensite,
+            :nb_gares, :nb_stations_velib, :capacite_velib_totale, :nb_lignes_transport,
+            :lignes_par_gare_moyen, :nb_modes_lourds, :nb_arrets_bus, :pct_arrets_accessibles,
+            :flux_multimodal, :flux_velo_trott, :flux_bus, :flux_motorise,
+            :pct_flux_velo_trott, :pct_flux_motorise, :pct_flux_voie_cyclable,
+            :score_loisirs, :nb_evenements, :nb_cinemas, :nb_terrasses, :nb_musees,
+            :score_services, :nb_ecoles, :nb_maternelles, :nb_colleges, :nb_bibliotheques,
+            :nb_bureaux_poste, :nb_ensup,
+            :score_global
+        )
+        ON CONFLICT (quartier_id, annee) DO UPDATE SET
+            quartier_code          = EXCLUDED.quartier_code,
+            arrondissement         = EXCLUDED.arrondissement,
+            nom                    = EXCLUDED.nom,
+            prix_m2_median         = EXCLUDED.prix_m2_median,
+            pct_logements_sociaux  = EXCLUDED.pct_logements_sociaux,
+            nb_logements_sociaux   = EXCLUDED.nb_logements_sociaux,
+            score_qualite_vie      = EXCLUDED.score_qualite_vie,
+            nb_espaces_verts       = EXCLUDED.nb_espaces_verts,
+            nb_arbres              = EXCLUDED.nb_arbres,
+            score_air_no2          = EXCLUDED.score_air_no2,
+            score_air_pm25         = EXCLUDED.score_air_pm25,
+            pct_fibre              = EXCLUDED.pct_fibre,
+            nb_sanisettes          = EXCLUDED.nb_sanisettes,
+            nb_chantiers_actifs    = EXCLUDED.nb_chantiers_actifs,
+            nb_anomalies           = EXCLUDED.nb_anomalies,
+            score_transports       = EXCLUDED.score_transports,
+            score_transport_offre  = EXCLUDED.score_transport_offre,
+            score_transport_intensite = EXCLUDED.score_transport_intensite,
+            nb_gares               = EXCLUDED.nb_gares,
+            nb_stations_velib      = EXCLUDED.nb_stations_velib,
+            capacite_velib_totale  = EXCLUDED.capacite_velib_totale,
+            nb_lignes_transport    = EXCLUDED.nb_lignes_transport,
+            lignes_par_gare_moyen  = EXCLUDED.lignes_par_gare_moyen,
+            nb_modes_lourds        = EXCLUDED.nb_modes_lourds,
+            nb_arrets_bus          = EXCLUDED.nb_arrets_bus,
+            pct_arrets_accessibles = EXCLUDED.pct_arrets_accessibles,
+            flux_multimodal        = EXCLUDED.flux_multimodal,
+            flux_velo_trott        = EXCLUDED.flux_velo_trott,
+            flux_bus               = EXCLUDED.flux_bus,
+            flux_motorise          = EXCLUDED.flux_motorise,
+            pct_flux_velo_trott    = EXCLUDED.pct_flux_velo_trott,
+            pct_flux_motorise      = EXCLUDED.pct_flux_motorise,
+            pct_flux_voie_cyclable = EXCLUDED.pct_flux_voie_cyclable,
+            score_loisirs          = EXCLUDED.score_loisirs,
+            nb_evenements          = EXCLUDED.nb_evenements,
+            nb_cinemas             = EXCLUDED.nb_cinemas,
+            nb_terrasses           = EXCLUDED.nb_terrasses,
+            nb_musees              = EXCLUDED.nb_musees,
+            score_services         = EXCLUDED.score_services,
+            nb_ecoles              = EXCLUDED.nb_ecoles,
+            nb_maternelles         = EXCLUDED.nb_maternelles,
+            nb_colleges            = EXCLUDED.nb_colleges,
+            nb_bibliotheques       = EXCLUDED.nb_bibliotheques,
+            nb_bureaux_poste       = EXCLUDED.nb_bureaux_poste,
+            nb_ensup               = EXCLUDED.nb_ensup,
+            score_global           = EXCLUDED.score_global
+    """)
+
+    with engine.connect() as conn:
+        for quartier_id, kpis in kpis_by_quartier.items():
+            conn.execute(sql, {"quartier_id": quartier_id, "annee": annee, **kpis})
+        conn.commit()
+    log.info(f"  ✓ {len(kpis_by_quartier)} quartiers upsertés (annee={annee})")
+
+
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 def run(annee: int | None = None):
     from datetime import date
+    from init_db import run as init_gold_schema
     if annee is None:
         annee = date.today().year
 
@@ -447,25 +1312,31 @@ def run(annee: int | None = None):
     log.info(f"Gold Aggregator — annee={annee}")
     log.info("=" * 60)
 
+    log.info("Vérification du schéma Gold...")
+    init_gold_schema()
+
     db = get_mongo()
     engine = get_engine()
 
-    log.info("\n[1/6] Géométries arrondissements")
+    log.info("\n[1/8] Géométries quartiers")
+    load_quartiers_geo(engine)
+
+    log.info("\n[2/8] Géométries arrondissements")
     load_arrondissements_geo(engine)
 
-    log.info("\n[2/6] Agrégation qualité de vie")
+    log.info("\n[3/8] Agrégation qualité de vie")
     qv = agg_qualite_vie(db)
 
-    log.info("\n[3/6] Agrégation transports")
+    log.info("\n[4/8] Agrégation transports")
     tr = agg_transports(db)
 
-    log.info("\n[4/6] Agrégation loisirs")
+    log.info("\n[5/8] Agrégation loisirs")
     lo = agg_loisirs(db)
 
-    log.info("\n[5/6] Agrégation services publics")
+    log.info("\n[6/8] Agrégation services publics")
     sv = agg_services(db)
 
-    log.info("\n[6/6] Agrégation immobilier (DVF+ prix m²)")
+    log.info("\n[7/8] Agrégation immobilier (DVF+ prix m²)")
     im = agg_immobilier(db, annee)
 
     # Fusion + score global
@@ -487,6 +1358,10 @@ def run(annee: int | None = None):
         kpis_by_arr[arr] = row
 
     upsert_kpis(engine, kpis_by_arr, annee)
+
+    log.info("\n[8/8] Agrégation KPI quartiers administratifs")
+    kpis_by_quartier = agg_quartiers(db, annee, kpis_by_arr)
+    upsert_quartier_kpis(engine, kpis_by_quartier, annee)
     engine.dispose()
 
     log.info("\n" + "=" * 60)

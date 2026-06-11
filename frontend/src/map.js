@@ -18,7 +18,7 @@ function scoreToColor(steps) {
   );
 }
 
-export function initMap(onArrClick) {
+export function initMap(onQuartierClick) {
   map = new maplibregl.Map({
     container: "map",
     style: "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json",
@@ -44,15 +44,15 @@ export function initMap(onArrClick) {
 
   map.on("load", () => {
     map.resize();
-    map.addSource("arrondissements", {
+    map.addSource("quartiers", {
       type: "geojson",
       data: { type: "FeatureCollection", features: [] },
     });
 
     map.addLayer({
-      id: "arrondissements-fill",
+      id: "quartiers-fill",
       type: "fill",
-      source: "arrondissements",
+      source: "quartiers",
       paint: {
         "fill-color": scoreToColor(COLOR_STEPS),
         "fill-opacity": 0.75,
@@ -60,20 +60,20 @@ export function initMap(onArrClick) {
     });
 
     map.addLayer({
-      id: "arrondissements-border",
+      id: "quartiers-border",
       type: "line",
-      source: "arrondissements",
+      source: "quartiers",
       paint: {
         "line-color": "#ffffff",
-        "line-width": 1.5,
+        "line-width": 1.1,
       },
     });
 
     map.addLayer({
-      id: "arrondissements-selected",
+      id: "quartiers-selected",
       type: "line",
-      source: "arrondissements",
-      filter: ["==", "arrondissement", -1],
+      source: "quartiers",
+      filter: ["==", "quartier_id", ""],
       paint: {
         "line-color": "#0066ff",
         "line-width": 3,
@@ -82,30 +82,38 @@ export function initMap(onArrClick) {
   });
 
   // Hover tooltip
-  map.on("mousemove", "arrondissements-fill", (e) => {
+  map.on("mousemove", "quartiers-fill", (e) => {
     if (!e.features.length) return;
     map.getCanvas().style.cursor = "pointer";
     const props = e.features[0].properties;
     const score = props.__score != null ? Number(props.__score).toFixed(1) : "—";
+    const suffixe = props.arrondissement ? `<br/>${props.arrondissement}e arrondissement` : "";
     popup
       .setLngLat(e.lngLat)
       .setHTML(
-        `<strong>${props.nom || props.arrondissement + "e arrondissement"}</strong><br/>
+        `<strong>${props.nom || "Quartier administratif"}</strong>${suffixe}<br/>
          ${props.__indicateur_label || "Score"} : <b>${score}</b>`
       )
       .addTo(map);
   });
 
-  map.on("mouseleave", "arrondissements-fill", () => {
+  map.on("mouseleave", "quartiers-fill", () => {
     map.getCanvas().style.cursor = "";
     popup.remove();
   });
 
   // Click → sidebar
-  map.on("click", "arrondissements-fill", (e) => {
-    const arr = e.features[0].properties.arrondissement;
-    if (arr) onArrClick(arr);
-    map.setFilter("arrondissements-selected", ["==", "arrondissement", arr]);
+  map.on("click", "quartiers-fill", (e) => {
+    const props = e.features[0].properties;
+    if (props.quartier_id) {
+      onQuartierClick({
+        quartier_id: props.quartier_id,
+        quartier_code: props.quartier_code,
+        nom: props.nom,
+        arrondissement: props.arrondissement,
+      });
+      map.setFilter("quartiers-selected", ["==", "quartier_id", props.quartier_id]);
+    }
   });
 
   return map;
@@ -124,7 +132,7 @@ export function updateMapData(geojson, indicateur, indicateurLabel) {
     },
   }));
 
-  map.getSource("arrondissements").setData({ type: "FeatureCollection", features });
+  map.getSource("quartiers").setData({ type: "FeatureCollection", features });
 }
 
 export function flyToLngLat(lng, lat, zoom = 14) {

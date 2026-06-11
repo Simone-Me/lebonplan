@@ -222,7 +222,7 @@ DATASETS = [
         "source": "transport_gouv",
         "api_base_url": "https://data.iledefrance-mobilites.fr/api/explore/v2.1/catalog/datasets",
         "api_dataset_id": "arrets",
-        "api_max_records": 500,
+        "api_max_records": 5000,
         "format_source": "api_idf",
     },
     # ══════════════════════════════════════════════════════════════════════════

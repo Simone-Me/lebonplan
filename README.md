@@ -4,6 +4,13 @@ Explorer, comprendre et comparer les dynamiques du logement et de la qualité de
 
 ---
 
+## Documentation complémentaire
+
+- Guide de démarrage de l'application : ce README
+- Logique cartographique et niveau de détail : `docs/carte-detaillee-paris.md`
+
+---
+
 ## Architecture
 
 ```
@@ -13,11 +20,11 @@ APIs / fichiers locaux (Parquet, CSV, JSON, GeoJSON)
               ↓  silver_transformer.py
   [Silver — MongoDB]             ← NoSQL Document Store, index géospatial 2dsphere
               ↓  gold_aggregator.py
-  [Gold — PostgreSQL / PostGIS]  ← SQL relationnel, KPIs agrégés, géométries arrondissements
+  [Gold — PostgreSQL / PostGIS]  ← SQL relationnel, KPIs agrégés, géométries + KPI arrondissements/quartiers
               ↓  FastAPI
   [API REST]                     ← /api/geo, /api/kpis, /api/timeline, /api/compare
               ↓  MapLibre GL JS
-  [Dashboard web interactif]     ← Choroplèthe + timeline + comparaison + géocodage BAN
+  [Dashboard web interactif]     ← Choroplèthe quartier administratif + timeline + comparaison + géocodage BAN
 ```
 
 ### Pourquoi SQL + NoSQL ?
@@ -65,9 +72,26 @@ python pipeline/silver_transformer.py
 # Gold : init tables PostgreSQL
 python pipeline/init_db.py
 
-# Gold : agrégation KPIs → PostgreSQL
+# Gold : agrégation KPIs arrondissement + quartier administratif → PostgreSQL
 python pipeline/gold_aggregator.py
 ```
+
+Ordre conseillé au premier lancement :
+
+1. `docker-compose up -d`
+2. `python pipeline/init_db.py`
+3. `python pipeline/bronze_feeder.py`
+4. `python pipeline/silver_transformer.py`
+5. `python pipeline/gold_aggregator.py`
+
+Si vous travaillez avec le `docker-compose.yml` du projet, la configuration attendue côté Python est maintenant :
+
+```env
+POSTGRES_HOST=127.0.0.1
+POSTGRES_PORT=5433
+```
+
+Le port `5433` évite le conflit fréquent avec un PostgreSQL Windows déjà lancé en local sur `5432`.
 
 ### 5. API
 
@@ -122,9 +146,10 @@ npm run dev
 #### Indicateur 2 — Transports
 | Dataset | Source | Format |
 |---------|--------|--------|
-| Comptages multimodaux permanents | parisdata | API |
+| Comptages multimodaux permanents des voies | parisdata | API |
 | Vélib — stations disponibilité | parisdata | API |
 | Gares de voyageurs IDF | data.iledefrance-mobilites.fr | API |
+| Arrêts de bus IDF | data.iledefrance-mobilites.fr | API |
 
 #### Indicateur 3 — Loisirs
 | Dataset | Source | Format |
@@ -158,7 +183,25 @@ Agrège : espaces verts, arbres, couverture fibre, sanisettes, qualité de l'air
 Soustrait : chantiers actifs et anomalies signalées.
 
 ### Transports (score 0–100)
-Nombre de gares, stations Vélib, flux multimodal par arrondissement.
+La logique actuelle suit une formule unique :
+
+`score_transports = 0.6 × offre + 0.4 × intensite`
+
+Bloc offre :
+- stations Vélib
+- capacité Vélib
+- gares
+- lignes distinctes
+- modes lourds présents
+- arrêts de bus
+- part d’arrêts accessibles
+
+Bloc intensité :
+- flux multimodal total
+- flux vélo / trottinette
+- flux bus
+- part de flux en voie cyclable
+- part motorisée inversée
 
 ### Loisirs (score 0–100)
 Densité d'événements culturels, cinémas, terrasses, musées.
@@ -175,8 +218,11 @@ Densité d'événements culturels, cinémas, terrasses, musées.
 | Méthode | Route | Description |
 |---------|-------|-------------|
 | GET | `/api/geo/arrondissements` | GeoJSON 20 arrondissements + KPIs |
+| GET | `/api/geo/quartiers` | GeoJSON 80 quartiers administratifs + KPIs |
 | GET | `/api/kpis/{1-20}` | KPIs d'un arrondissement |
-| GET | `/api/timeline/{1-20}` | Évolution temporelle |
+| GET | `/api/kpis/quartier/{quartier_id}` | KPIs d'un quartier administratif |
+| GET | `/api/timeline/{1-20}` | Évolution temporelle arrondissement |
+| GET | `/api/timeline/quartier/{quartier_id}` | Évolution temporelle quartier |
 | GET | `/api/compare?arr1=X&arr2=Y` | Comparaison côte à côte |
 | GET | `/api/health` | Santé de l'API |
 
@@ -208,7 +254,7 @@ Docs Swagger : `http://localhost:8000/docs`
 │   ├── config.py             # Config centralisée (.env)
 │   ├── bronze_feeder.py      # Ingestion → MinIO bronze
 │   ├── silver_transformer.py # Nettoyage → MongoDB + MinIO silver
-│   ├── gold_aggregator.py    # Agrégation KPIs → PostgreSQL
+│   ├── gold_aggregator.py    # Agrégation KPIs arrondissement + quartier → PostgreSQL
 │   └── init_db.py            # DDL PostgreSQL (CREATE TABLE)
 ├── api/
 │   ├── main.py               # FastAPI app
@@ -224,6 +270,31 @@ Docs Swagger : `http://localhost:8000/docs`
 ├── requirements.txt
 └── .env.example
 ```
+
+---
+
+## Logique cartographique
+
+Niveau affiché par défaut :
+- `quartier_paris` de l’Open Data Paris
+- 80 quartiers administratifs
+
+Source de fond de carte :
+- tuiles vectorielles MapLibre via le style `Carto Positron`
+
+Source géographique métier :
+- `gold.quartiers_geo` pour les polygones
+- `gold.quartier_kpis` pour les valeurs agrégées
+
+Logique de calcul :
+1. Le `silver_transformer` homogénéise les coordonnées en WGS84 et garde `location`.
+2. Le `gold_aggregator` affecte les points Silver à un quartier administratif via point-in-polygon.
+3. Les agrégations métier sont recalculées à l’échelle quartier.
+4. Les données non distribuables finement, comme certains prix DVF agrégés, sont héritées depuis l’arrondissement.
+5. L’API expose directement un GeoJSON quartier enrichi en KPI pour la choroplèthe.
+
+Pour le détail complet de cette logique et la façon de la modifier :
+- `docs/carte-detaillee-paris.md`
 
 ---
 

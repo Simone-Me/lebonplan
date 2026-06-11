@@ -101,6 +101,26 @@ html, body {
   color: var(--gray-3);
 }
 
+.toggle-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  font-size: 13px;
+  line-height: 1.35;
+  cursor: pointer;
+}
+
+.toggle-row input[type="checkbox"] {
+  margin-top: 2px;
+  accent-color: var(--blue);
+}
+
+.panel-help {
+  font-size: 11px;
+  color: var(--gray-3);
+  line-height: 1.4;
+}
+
 select {
   width: 100%;
   border: 1px solid var(--gray-2);

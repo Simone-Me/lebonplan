@@ -24,22 +24,31 @@ function scoreBar(score) {
   </div>`;
 }
 
-export async function openSidebar(arrondissement, annee) {
+export async function openSidebar(quartierSelection, annee) {
+  const quartierId = typeof quartierSelection === "object" ? quartierSelection.quartier_id : quartierSelection;
+  const quartierMeta = typeof quartierSelection === "object" ? quartierSelection : { quartier_id: quartierSelection };
   const content = document.getElementById("sidebar-content");
 
   content.innerHTML = `<p class="loading">Chargement…</p>`;
 
   try {
     const [kpis, timeline] = await Promise.all([
-      fetchKPIs(arrondissement, annee),
-      fetchTimeline(arrondissement),
+      fetchKPIs(quartierId, annee),
+      fetchTimeline(quartierId),
     ]);
 
-    const nom = `${arrondissement}${arrondissement === 1 ? "er" : "e"} arrondissement`;
+    const nom = kpis.nom || timeline.nom || quartierMeta.nom || "Quartier administratif";
+    const code = kpis.quartier_code || timeline.quartier_code || quartierMeta.quartier_code;
+    const arr = kpis.arrondissement || timeline.arrondissement || quartierMeta.arrondissement;
+    const metaLigne = [
+      `Données ${annee}`,
+      code ? `Code ${code}` : null,
+      arr ? `${arr}e arrondissement` : null,
+    ].filter(Boolean).join(" · ");
 
     content.innerHTML = `
       <h2>${nom}</h2>
-      <p class="meta">Données ${annee}</p>
+      <p class="meta">${metaLigne}</p>
 
       <section class="kpi-section">
         <h3>Scores composites</h3>
@@ -71,7 +80,19 @@ export async function openSidebar(arrondissement, annee) {
         <h3>Transports</h3>
         <div class="kpi-row"><span>Gares</span><b>${fmt(kpis.nb_gares)}</b></div>
         <div class="kpi-row"><span>Stations Vélib</span><b>${fmt(kpis.nb_stations_velib)}</b></div>
-        <div class="kpi-row"><span>Flux multimodal</span><b>${fmt(kpis.flux_multimodal)}</b></div>
+        <div class="kpi-row"><span>Capacité Vélib totale</span><b>${fmt(kpis.capacite_velib_totale)}</b></div>
+        <div class="kpi-row"><span>Lignes distinctes</span><b>${fmt(kpis.nb_lignes_transport)}</b></div>
+        <div class="kpi-row"><span>Lignes par gare</span><b>${fmt(kpis.lignes_par_gare_moyen)}</b></div>
+        <div class="kpi-row"><span>Modes lourds présents</span><b>${fmt(kpis.nb_modes_lourds)}</b></div>
+        <div class="kpi-row"><span>Arrêts de bus</span><b>${fmt(kpis.nb_arrets_bus)}</b></div>
+        <div class="kpi-row"><span>Arrêts accessibles</span><b>${fmt(kpis.pct_arrets_accessibles, " %")}</b></div>
+        <div class="kpi-row"><span>Flux total</span><b>${fmt(kpis.flux_multimodal)}</b></div>
+        <div class="kpi-row"><span>Flux vélo / trottinette</span><b>${fmt(kpis.flux_velo_trott)}</b></div>
+        <div class="kpi-row"><span>Flux bus</span><b>${fmt(kpis.flux_bus)}</b></div>
+        <div class="kpi-row"><span>Flux motorisé</span><b>${fmt(kpis.flux_motorise)}</b></div>
+        <div class="kpi-row"><span>Part vélo / trottinette</span><b>${fmt(kpis.pct_flux_velo_trott, " %")}</b></div>
+        <div class="kpi-row"><span>Part motorisée</span><b>${fmt(kpis.pct_flux_motorise, " %")}</b></div>
+        <div class="kpi-row"><span>Part voies cyclables</span><b>${fmt(kpis.pct_flux_voie_cyclable, " %")}</b></div>
       </section>
 
       <section class="kpi-section">
@@ -101,28 +122,32 @@ export async function openSidebar(arrondissement, annee) {
     if (timelineChart) timelineChart.destroy();
     const years  = timeline.points.map((p) => p.annee);
     const scores = timeline.points.map((p) => p.score_global);
-
-    timelineChart = new Chart(document.getElementById("timeline-chart"), {
-      type: "line",
-      data: {
-        labels: years,
-        datasets: [{
-          label: "Score global",
-          data: scores,
-          borderColor: "#0066ff",
-          backgroundColor: "rgba(0,102,255,0.1)",
-          tension: 0.3,
-          fill: true,
-        }],
-      },
-      options: {
-        plugins: { legend: { display: false } },
-        scales: {
-          y: { min: 0, max: 100, grid: { color: "#e5e7eb" } },
-          x: { grid: { display: false } },
+    const chartNode = document.getElementById("timeline-chart");
+    if (years.length) {
+      timelineChart = new Chart(chartNode, {
+        type: "line",
+        data: {
+          labels: years,
+          datasets: [{
+            label: "Score global",
+            data: scores,
+            borderColor: "#0066ff",
+            backgroundColor: "rgba(0,102,255,0.1)",
+            tension: 0.3,
+            fill: true,
+          }],
         },
-      },
-    });
+        options: {
+          plugins: { legend: { display: false } },
+          scales: {
+            y: { min: 0, max: 100, grid: { color: "#e5e7eb" } },
+            x: { grid: { display: false } },
+          },
+        },
+      });
+    } else if (chartNode) {
+      chartNode.outerHTML = `<p class="meta">Aucune série historique disponible pour ce quartier.</p>`;
+    }
 
   } catch (e) {
     content.innerHTML = `<p class="error">Erreur : ${e.message}</p>`;

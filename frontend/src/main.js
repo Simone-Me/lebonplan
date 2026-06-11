@@ -45,7 +45,7 @@ function updateLegend() {
 }
 
 function init() {
-  initMap((arr) => openSidebar(arr, currentAnnee));
+  initMap((quartier) => openSidebar(quartier, currentAnnee));
 
   const indicateurSel = document.getElementById("indicateur-select");
   indicateurSel.addEventListener("change", () => {

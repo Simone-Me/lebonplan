@@ -9,6 +9,7 @@ import struct
 import re
 import pandas as pd
 import boto3
+import requests
 from io import BytesIO
 from pymongo import MongoClient, UpdateOne
 from botocore.exceptions import ClientError
@@ -27,6 +28,8 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 log = logging.getLogger("silver_transformer")
+ARRONDISSEMENTS_GEO_URL = "https://opendata.paris.fr/api/explore/v2.1/catalog/datasets/arrondissements/exports/geojson?lang=fr&timezone=Europe%2FParis"
+_ARRONDISSEMENT_SHAPES = None
 
 # ─── MinIO ────────────────────────────────────────────────────────────────────
 
@@ -104,6 +107,90 @@ def latlon_cols_to_geojson(lat_col, lon_col) -> list:
     return result
 
 
+def _extract_polygon_rings(geometry: dict) -> list[list[list[float]]]:
+    """Extrait les anneaux externes d'une géométrie GeoJSON Polygon/MultiPolygon."""
+    if not isinstance(geometry, dict):
+        return []
+    gtype = geometry.get("type")
+    coords = geometry.get("coordinates", [])
+    if gtype == "Polygon":
+        return [coords[0]] if coords else []
+    if gtype == "MultiPolygon":
+        return [poly[0] for poly in coords if poly]
+    return []
+
+
+def _point_in_ring(lon: float, lat: float, ring: list[list[float]]) -> bool:
+    """Test de point-in-polygon simple par ray casting sur un anneau."""
+    inside = False
+    n = len(ring)
+    if n < 3:
+        return False
+    j = n - 1
+    for i in range(n):
+        xi, yi = ring[i][0], ring[i][1]
+        xj, yj = ring[j][0], ring[j][1]
+        intersects = ((yi > lat) != (yj > lat)) and (
+            lon < (xj - xi) * (lat - yi) / ((yj - yi) or 1e-12) + xi
+        )
+        if intersects:
+            inside = not inside
+        j = i
+    return inside
+
+
+def _load_arrondissement_shapes():
+    """Charge et met en cache les polygones des arrondissements pour affectation spatiale."""
+    global _ARRONDISSEMENT_SHAPES
+    if _ARRONDISSEMENT_SHAPES is not None:
+        return _ARRONDISSEMENT_SHAPES
+
+    shapes = []
+    try:
+        response = requests.get(ARRONDISSEMENTS_GEO_URL, timeout=30)
+        response.raise_for_status()
+        geojson = response.json()
+        for feature in geojson.get("features", []):
+            props = feature.get("properties", {})
+            arr = None
+            for key in ["c_ar", "c_arinsee", "l_ar", "arrondissement"]:
+                if key in props:
+                    arr = parse_arrondissement(props.get(key))
+                    if arr:
+                        break
+            if not arr:
+                continue
+            rings = _extract_polygon_rings(feature.get("geometry", {}))
+            if rings:
+                shapes.append((arr, rings))
+    except Exception as exc:
+        log.warning(f"    Impossible de charger les polygones d'arrondissements pour l'affectation spatiale: {exc}")
+        shapes = []
+
+    _ARRONDISSEMENT_SHAPES = shapes
+    return _ARRONDISSEMENT_SHAPES
+
+
+def infer_arrondissement_from_location(location: dict | None) -> int | None:
+    """Déduit l'arrondissement à partir d'un point GeoJSON WGS84."""
+    if not isinstance(location, dict):
+        return None
+    coords = location.get("coordinates", [])
+    if len(coords) != 2:
+        return None
+    lon, lat = coords
+    try:
+        lon = float(lon)
+        lat = float(lat)
+    except Exception:
+        return None
+
+    for arr, rings in _load_arrondissement_shapes():
+        if any(_point_in_ring(lon, lat, ring) for ring in rings):
+            return arr
+    return None
+
+
 def _rename_first_existing(df: pd.DataFrame, target: str, candidates: list[str]) -> pd.DataFrame:
     """Renomme la première colonne trouvée parmi plusieurs alias vers un nom cible."""
     if target in df.columns:
@@ -124,14 +211,31 @@ def _base_geo(df: pd.DataFrame) -> pd.DataFrame:
     if "geo_shape" in df.columns:
         df = df.drop(columns=["geo_shape"])
     # Colonnes lat/lon explicites (API IDF)
-    for lat_c, lon_c in [("lat", "lon"), ("latitude", "longitude"), ("ylatitude", "xlongitude")]:
+    for lat_c, lon_c in [
+        ("lat", "lon"),
+        ("latitude", "longitude"),
+        ("ylatitude", "xlongitude"),
+        ("arrgeopoint.lat", "arrgeopoint.lon"),
+        ("coordonnees_geo.lat", "coordonnees_geo.lon"),
+    ]:
         if lat_c in df.columns and lon_c in df.columns and "location" not in df.columns:
             df["location"] = latlon_cols_to_geojson(df[lat_c], df[lon_c])
     # Arrondissement
-    for col in ["arrondissement", "cp_arrondissement", "code_postal", "arr_insee", "arr_libelle"]:
+    for col in [
+        "arrondissement", "cp_arrondissement", "code_postal", "arr_insee", "arr_libelle",
+        "nom_arrondissement", "arrtown", "arrpostalregion", "code_insee_commune",
+        "nom_arrondissement_communes",
+    ]:
         if col in df.columns:
             df["arrondissement"] = df[col].apply(parse_arrondissement)
             break
+    if "location" in df.columns and ("arrondissement" not in df.columns or df["arrondissement"].isna().any()):
+        if "arrondissement" not in df.columns:
+            df["arrondissement"] = None
+        df["arrondissement"] = df["arrondissement"].astype("object")
+        missing_mask = df["arrondissement"].isna()
+        if missing_mask.any():
+            df.loc[missing_mask, "arrondissement"] = df.loc[missing_mask, "location"].apply(infer_arrondissement_from_location)
     return df
 
 
@@ -213,15 +317,18 @@ def transform_ecoles(df: pd.DataFrame) -> pd.DataFrame:
 def transform_idf_geo(df: pd.DataFrame) -> pd.DataFrame:
     """Datasets IDF OpenData : colonnes lat/lon + filtre Paris (75)."""
     df = _base_geo(df)
+    original_df = df
 
-    before = len(df)
+    def _keep_if_non_empty(mask):
+        filtered = df[mask]
+        return filtered if not filtered.empty else None
 
-    # 1. Code postal commence par 75
+    # 1. Code postal / code commune commençant par 75
     for cp_col in ["code_postal", "cp", "codepostal", "code_commune_insee"]:
         if cp_col in df.columns:
-            df = df[df[cp_col].astype(str).str.startswith("75")]
-            if len(df) < before:
-                return df
+            filtered = _keep_if_non_empty(df[cp_col].astype(str).str.startswith("75"))
+            if filtered is not None:
+                return filtered
 
     # 2. Colonne département numérique (ex: "75") ou textuelle (ex: "Paris")
     for dep_col in ["departement", "dep", "code_dep", "num_dep"]:
@@ -230,31 +337,33 @@ def transform_idf_geo(df: pd.DataFrame) -> pd.DataFrame:
                 df[dep_col].astype(str).str.startswith("75") |
                 df[dep_col].astype(str).str.lower().str.contains("paris")
             )
-            df = df[mask]
-            if len(df) < before:
-                return df
+            filtered = _keep_if_non_empty(mask)
+            if filtered is not None:
+                return filtered
 
-    # 3. Colonne ville/commune textuelle contenant "Paris" (ex: arrtown, town, ville)
-    for town_col in ["arrtown", "town", "ville", "city_name", "commune_name"]:
+    # 3. Colonne ville/commune textuelle contenant "Paris"
+    for town_col in ["arrtown", "town", "ville", "city_name", "commune_name", "nom_commune", "commune"]:
         if town_col in df.columns:
-            mask = df[town_col].astype(str).str.contains("Paris", case=False, na=False)
-            df = df[mask]
-            if len(df) < before:
-                return df
+            filtered = _keep_if_non_empty(df[town_col].astype(str).str.contains("Paris", case=False, na=False))
+            if filtered is not None:
+                return filtered
 
     # 4. Bbox géographique Paris (fallback)
     if "location" in df.columns:
         def in_paris(loc):
             if not isinstance(loc, dict):
-                return True
+                return False
             coords = loc.get("coordinates", [])
             if len(coords) == 2:
                 lon, lat = coords
                 return 2.22 <= lon <= 2.47 and 48.81 <= lat <= 48.91
-            return True
-        df = df[df["location"].apply(in_paris)]
+            return False
 
-    return df
+        filtered = _keep_if_non_empty(df["location"].apply(in_paris))
+        if filtered is not None:
+            return filtered
+
+    return original_df
 
 
 def transform_idf_transport(df: pd.DataFrame) -> pd.DataFrame:
@@ -265,19 +374,30 @@ def transform_idf_transport(df: pd.DataFrame) -> pd.DataFrame:
     df = transform_idf_geo(df)
 
     aliases = {
-        "identifiant": ["id", "id_ref_zdl", "id_refa", "objectid", "stop_id", "stopareaid"],
-        "nom": ["nom", "nomlong", "nom_gare", "nom_arret", "libelle", "stopname", "name"],
+        "identifiant": ["id", "id_ref_zdl", "id_refa", "objectid", "stop_id", "stopareaid", "arrid", "id_gares"],
+        "nom": ["nom", "nomlong", "nom_gare", "nom_arret", "libelle", "stopname", "name", "arrname", "nom_gares"],
         "mode_transport": ["mode", "transportmode", "modeprincipa", "mode_principal", "type_arret", "type"],
-        "ligne": ["ligne", "nomligne", "res_com", "res_stif", "line"],
-        "commune": ["commune", "nom_commune", "nomcommune", "city"],
-        "code_postal": ["code_postal", "cp", "codepostal", "postal_code"],
+        "ligne": ["ligne", "nomligne", "res_com", "res_stif", "line", "indice_lig"],
+        "commune": ["commune", "nom_commune", "nomcommune", "city", "arrtown"],
+        "code_postal": ["code_postal", "cp", "codepostal", "postal_code", "arrpostalregion"],
+        "accessible": ["arraccessibility"],
     }
     for target, candidates in aliases.items():
         df = _rename_first_existing(df, target, candidates)
 
+    if "arrondissement" not in df.columns or df["arrondissement"].isna().all():
+        for col in ["commune", "code_postal", "nom", "ligne"]:
+            if col in df.columns:
+                parsed = df[col].apply(parse_arrondissement)
+                if parsed.notna().any():
+                    df["arrondissement"] = parsed
+                    break
+
     keep = [
         "identifiant", "nom", "mode_transport", "ligne",
-        "commune", "code_postal", "arrondissement", "location",
+        "commune", "code_postal", "arrondissement", "accessible",
+        "terrer", "termetro", "tertram", "tertrain", "terval",
+        "location",
         "_ingested_at", "_dataset_id", "_indicateur", "_signe", "_source",
     ]
     return df[[c for c in keep if c in df.columns]]
@@ -299,7 +419,19 @@ def transform_velib(df: pd.DataFrame) -> pd.DataFrame:
     if drop_cols:
         df = df.drop(columns=drop_cols)
 
-    return _base_geo(df)
+    df = _base_geo(df)
+    df = df.rename(columns={
+        "name": "nom",
+        "creditcard": "paiement_cb",
+    })
+    keep = [
+        "stationcode", "nom", "capacity",
+        "numbikesavailable", "numdocksavailable", "mechanical", "ebike",
+        "is_renting", "is_returning", "paiement_cb",
+        "nom_arrondissement_communes", "code_insee_commune", "arrondissement", "location",
+        "_ingested_at", "_dataset_id", "_indicateur", "_signe", "_source",
+    ]
+    return df[[c for c in keep if c in df.columns]]
 
 
 def transform_passthrough(df: pd.DataFrame) -> pd.DataFrame:

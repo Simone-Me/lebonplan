@@ -2,20 +2,20 @@ const BASE = "/api";
 
 export async function fetchGeoJSON(annee, indicateur) {
   const params = new URLSearchParams({ annee, indicateur });
-  const r = await fetch(`${BASE}/geo/arrondissements?${params}`);
+  const r = await fetch(`${BASE}/geo/quartiers?${params}`);
   if (!r.ok) throw new Error(`GeoJSON fetch failed: ${r.status}`);
   return r.json();
 }
 
-export async function fetchKPIs(arrondissement, annee) {
+export async function fetchKPIs(quartierId, annee) {
   const params = annee ? `?annee=${annee}` : "";
-  const r = await fetch(`${BASE}/kpis/${arrondissement}${params}`);
+  const r = await fetch(`${BASE}/kpis/quartier/${encodeURIComponent(quartierId)}${params}`);
   if (!r.ok) throw new Error(`KPIs fetch failed: ${r.status}`);
   return r.json();
 }
 
-export async function fetchTimeline(arrondissement) {
-  const r = await fetch(`${BASE}/timeline/${arrondissement}`);
+export async function fetchTimeline(quartierId) {
+  const r = await fetch(`${BASE}/timeline/quartier/${encodeURIComponent(quartierId)}`);
   if (!r.ok) throw new Error(`Timeline fetch failed: ${r.status}`);
   return r.json();
 }
