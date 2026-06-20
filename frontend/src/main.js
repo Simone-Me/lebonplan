@@ -1,5 +1,5 @@
 import "maplibre-gl/dist/maplibre-gl.css";
-import { initMap, updateMapData } from "./map.js";
+import { initMap, updateMapData, setMapTheme } from "./map.js";
 import { openSidebar } from "./sidebar.js";
 import { initCompare } from "./compare.js";
 import { initGeocode } from "./geocode.js";
@@ -33,14 +33,15 @@ function updateLegend() {
     INDICATEUR_LABELS[currentIndicateur] || currentIndicateur;
 
   const gradient = document.getElementById("legend-gradient");
-  if (["prix_m2_median", "pct_logements_sociaux"].includes(currentIndicateur)) {
-    gradient.style.background = "linear-gradient(to right, #ffffcc, #0066ff)";
-    document.querySelector(".legend-min").textContent = "min";
-    document.querySelector(".legend-max").textContent = "max";
+  const isRaw = ["prix_m2_median", "pct_logements_sociaux"].includes(currentIndicateur);
+  if (isRaw) {
+    gradient.style.background = "linear-gradient(to right, #1e3a5f, #3b82f6)";
+    document.getElementById("legend-min").textContent = "min";
+    document.getElementById("legend-max").textContent = "max";
   } else {
-    gradient.style.background = "linear-gradient(to right, #d73027, #fdae61, #1a9641)";
-    document.querySelector(".legend-min").textContent = "0";
-    document.querySelector(".legend-max").textContent = "100";
+    gradient.style.background = "linear-gradient(to right, #ef4444, #f59e0b, #22c55e)";
+    document.getElementById("legend-min").textContent = "0";
+    document.getElementById("legend-max").textContent = "100";
   }
 }
 
@@ -63,6 +64,19 @@ function init() {
 
   initGeocode();
   initCompare(() => currentAnnee);
+
+  // Theme toggle
+  let darkMap = false;
+  const themeBtn  = document.getElementById("theme-toggle");
+  const iconSun   = document.getElementById("theme-icon-sun");
+  const iconMoon  = document.getElementById("theme-icon-moon");
+  themeBtn.addEventListener("click", () => {
+    darkMap = !darkMap;
+    setMapTheme(darkMap);
+    iconSun.classList.toggle("hidden", darkMap);
+    iconMoon.classList.toggle("hidden", !darkMap);
+    themeBtn.title = darkMap ? "Passer en mode clair" : "Passer en mode sombre";
+  });
 
   const waitForMap = setInterval(() => {
     try {
