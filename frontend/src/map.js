@@ -74,10 +74,11 @@ function computeScale(values) {
 }
 
 function reverseScale(scale) {
+  const colors = scale.steps.map(([, color]) => color).reverse();
   return {
     min: scale.min,
     max: scale.max,
-    steps: [...scale.steps].reverse(),
+    steps: scale.steps.map(([value], index) => [value, colors[index]]),
   };
 }
 

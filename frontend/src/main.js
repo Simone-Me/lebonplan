@@ -48,7 +48,9 @@ function updateLegend() {
   const legendNote = document.getElementById("legend-note");
 
   const gradient = document.getElementById("legend-gradient");
-  gradient.style.background = "linear-gradient(to right, #ef4444, #f59e0b, #22c55e)";
+  gradient.style.background = currentIndicateur === "prix_m2_median"
+    ? "linear-gradient(to right, #22c55e, #f59e0b, #ef4444)"
+    : "linear-gradient(to right, #ef4444, #f59e0b, #22c55e)";
   document.getElementById("legend-min").textContent = formatLegendValue(currentScale.min);
   document.getElementById("legend-max").textContent = formatLegendValue(currentScale.max);
   if (legendNote) {
