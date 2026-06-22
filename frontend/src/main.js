@@ -1,5 +1,5 @@
 import "maplibre-gl/dist/maplibre-gl.css";
-import { initMap, updateMapData, setMapTheme } from "./map.js";
+import { initMap, updateMapData, setMapTheme, getIndicatorScale, clearCompareHighlights } from "./map.js";
 import { openSidebar } from "./sidebar.js";
 import { initCompare } from "./compare.js";
 import { initGeocode } from "./geocode.js";
@@ -12,16 +12,30 @@ const INDICATEUR_LABELS = {
   score_loisirs:          "Loisirs",
   score_services:         "Services publics",
   prix_m2_median:         "Prix m² médian (€)",
-  pct_logements_sociaux:  "% Logements sociaux",
+  nb_logements_sociaux:   "Logements sociaux",
 };
 
 let currentAnnee = 2026;
 let currentIndicateur = "score_global";
+let currentScale = { min: 0, max: 100 };
+
+function formatLegendValue(value) {
+  if (!Number.isFinite(value)) return "—";
+  if (currentIndicateur === "prix_m2_median") {
+    return `${Math.round(value).toLocaleString("fr-FR")} €`;
+  }
+  if (currentIndicateur === "nb_logements_sociaux") {
+    return Math.round(value).toLocaleString("fr-FR");
+  }
+  return Number(value).toLocaleString("fr-FR", { maximumFractionDigits: 1 });
+}
 
 async function refreshMap() {
   try {
     const geojson = await fetchGeoJSON(currentAnnee, currentIndicateur);
-    updateMapData(geojson, currentIndicateur, INDICATEUR_LABELS[currentIndicateur]);
+    currentScale =
+      updateMapData(geojson, currentIndicateur, INDICATEUR_LABELS[currentIndicateur]) ??
+      currentScale;
     updateLegend();
   } catch (e) {
     console.error("Erreur fetchGeoJSON", e);
@@ -31,22 +45,21 @@ async function refreshMap() {
 function updateLegend() {
   document.getElementById("legend-title").textContent =
     INDICATEUR_LABELS[currentIndicateur] || currentIndicateur;
+  const legendNote = document.getElementById("legend-note");
 
   const gradient = document.getElementById("legend-gradient");
-  const isRaw = ["prix_m2_median", "pct_logements_sociaux"].includes(currentIndicateur);
-  if (isRaw) {
-    gradient.style.background = "linear-gradient(to right, #1e3a5f, #3b82f6)";
-    document.getElementById("legend-min").textContent = "min";
-    document.getElementById("legend-max").textContent = "max";
-  } else {
-    gradient.style.background = "linear-gradient(to right, #ef4444, #f59e0b, #22c55e)";
-    document.getElementById("legend-min").textContent = "0";
-    document.getElementById("legend-max").textContent = "100";
+  gradient.style.background = "linear-gradient(to right, #ef4444, #f59e0b, #22c55e)";
+  document.getElementById("legend-min").textContent = formatLegendValue(currentScale.min);
+  document.getElementById("legend-max").textContent = formatLegendValue(currentScale.max);
+  if (legendNote) {
+    legendNote.textContent = currentIndicateur === "prix_m2_median"
+      ? "Valeur DVF héritée de l'arrondissement avec couleurs inversées : plus cher = rouge."
+      : "";
   }
 }
 
 function init() {
-  initMap((quartier) => openSidebar(quartier, currentAnnee));
+  initMap((quartier) => openSidebar(quartier, currentAnnee, getIndicatorScale));
 
   const indicateurSel = document.getElementById("indicateur-select");
   indicateurSel.addEventListener("change", () => {
@@ -63,7 +76,7 @@ function init() {
   });
 
   initGeocode();
-  initCompare(() => currentAnnee);
+  initCompare(() => currentAnnee, clearCompareHighlights);
 
   // Theme toggle
   let darkMap = false;

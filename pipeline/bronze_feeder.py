@@ -13,6 +13,7 @@ Formats ingérés (RNCP variété) :
 
 import json
 import logging
+import re
 import requests
 import pandas as pd
 import boto3
@@ -461,43 +462,48 @@ def fetch_api_generic(dataset: dict) -> pd.DataFrame:
 
 def fetch_dvf_etalab() -> pd.DataFrame:
     """
-    Récupère les statistiques DVF (prix médian m²) pour les 20 arrondissements parisiens
-    via l'API tabular data.gouv.fr — dataset "Statistiques DVF" (Etalab).
-    Colonnes clés : code_geo (75101-75120), med_prix_m2_whole_appartement.
-    Format : api_dvf
+    Récupère l'historique DVF géolocalisé de Paris (département 75) depuis
+    les fichiers CSV annuels officiels de data.gouv.fr.
+
+    Cette source contient les mutations avec coordonnées WGS84 et permet ensuite
+    un calcul réel du prix médian au m² par arrondissement et quartier administratif.
     """
-    # API tabular data.gouv.fr — filtre sur echelle_geo=commune + codes Paris
-    RESOURCE_ID = "851d342f-9c96-41c1-924a-11a7a7aae8a6"
-    BASE = f"https://tabular-api.data.gouv.fr/api/resources/{RESOURCE_ID}/data/"
-    codes_paris = [f"751{str(i).zfill(2)}" for i in range(1, 21)]
-    rows = []
+    index_url = "https://files.data.gouv.fr/geo-dvf/latest/csv/"
+    year_urls = []
 
-    log.info("  Fetch DVF Statistiques totales — arrondissements Paris (75101-75120)")
-    for code in codes_paris:
+    try:
+        response = requests.get(index_url, timeout=30)
+        response.raise_for_status()
+        year_urls = [
+            (int(year), f"{index_url}{year}/departements/75.csv.gz")
+            for year in re.findall(r'/geo-dvf/latest/csv/(\d{4})/', response.text)
+        ]
+        year_urls = sorted({item for item in year_urls})
+    except Exception as exc:
+        log.warning(f"    DVF index indisponible, fallback sur 2021-2025 : {exc}")
+        year_urls = [
+            (year, f"{index_url}{year}/departements/75.csv.gz")
+            for year in range(2021, date.today().year)
+        ]
+
+    frames = []
+    log.info("  Fetch DVF géolocalisé historique — Paris (département 75)")
+    for year, url in year_urls:
         try:
-            r = requests.get(
-                BASE,
-                params={"code_geo__exact": code, "page_size": 5},
-                timeout=30,
-            )
-            r.raise_for_status()
-            data = r.json()
-            for item in data.get("data", []):
-                rows.append(item)
-        except Exception as e:
-            log.warning(f"    DVF erreur pour {code} : {e}")
+            df_year = pd.read_csv(url, compression="gzip", low_memory=False)
+            if df_year.empty:
+                continue
+            df_year["source_year"] = year
+            frames.append(df_year)
+            log.info(f"    ✓ {year} : {len(df_year)} lignes")
+        except Exception as exc:
+            log.warning(f"    DVF erreur pour {year} : {exc}")
 
-    if not rows:
+    if not frames:
         log.warning("    DVF : aucune donnée récupérée")
         return pd.DataFrame()
 
-    df = pd.DataFrame(rows)
-    # Renomme pour cohérence avec le reste du pipeline
-    df = df.rename(columns={
-        "code_geo": "code_insee",
-        "med_prix_m2_whole_appartement": "prix_m2_median",
-        "nb_ventes_whole_appartement": "nb_ventes",
-    })
+    df = pd.concat(frames, ignore_index=True)
     log.info(f"    → {len(df)} lignes DVF récupérées")
     return df
 
@@ -521,6 +527,7 @@ def _sanitize_for_export(df: pd.DataFrame) -> pd.DataFrame:
     Prépare le DataFrame pour la sérialisation :
     - Colonnes bytes → hex string (WKB géo préservé pour Silver)
     - Colonnes avec listes/dicts → JSON string
+    - Colonnes object → string pour éviter les erreurs PyArrow sur types mixtes
     """
     df = df.copy()
     for col in df.columns:
@@ -532,6 +539,8 @@ def _sanitize_for_export(df: pd.DataFrame) -> pd.DataFrame:
             df[col] = df[col].apply(lambda v: v.hex() if isinstance(v, bytes) else v)
         elif isinstance(first, (list, dict)):
             df[col] = df[col].apply(lambda v: json.dumps(v, ensure_ascii=False) if v is not None else None)
+        elif str(df[col].dtype) == "object":
+            df[col] = df[col].apply(lambda v: None if pd.isna(v) else str(v))
     return df
 
 

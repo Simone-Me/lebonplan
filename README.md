@@ -290,7 +290,7 @@ Logique de calcul :
 1. Le `silver_transformer` homogénéise les coordonnées en WGS84 et garde `location`.
 2. Le `gold_aggregator` affecte les points Silver à un quartier administratif via point-in-polygon.
 3. Les agrégations métier sont recalculées à l’échelle quartier.
-4. Les données non distribuables finement, comme certains prix DVF agrégés, sont héritées depuis l’arrondissement.
+4. Les données ponctuelles géolocalisées, y compris les mutations DVF, peuvent être réagrégées à l’échelle quartier.
 5. L’API expose directement un GeoJSON quartier enrichi en KPI pour la choroplèthe.
 
 Pour le détail complet de cette logique et la façon de la modifier :

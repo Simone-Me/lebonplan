@@ -1,15 +1,25 @@
 import { geocodeAddress } from "./api.js";
-import { flyToLngLat, placeMarker } from "./map.js";
+import { flyToLngLat, placeMarker, clearMarker } from "./map.js";
 
 let debounceTimer = null;
 
 export function initGeocode() {
   const input   = document.getElementById("geocode-input");
   const results = document.getElementById("geocode-results");
+  const clearBtn = document.getElementById("geocode-clear");
+
+  function resetGeocode() {
+    input.value = "";
+    results.classList.add("hidden");
+    results.innerHTML = "";
+    clearMarker();
+    clearBtn.classList.add("hidden");
+  }
 
   input.addEventListener("input", () => {
     clearTimeout(debounceTimer);
     const q = input.value.trim();
+    clearBtn.classList.toggle("hidden", q.length === 0);
     if (q.length < 3) {
       results.classList.add("hidden");
       results.innerHTML = "";
@@ -34,9 +44,18 @@ export function initGeocode() {
           placeMarker(lng, lat, f.properties.label);
           input.value = f.properties.label;
           results.classList.add("hidden");
+          clearBtn.classList.remove("hidden");
         });
       });
     }, 300);
+  });
+
+  clearBtn.addEventListener("click", resetGeocode);
+  window.addEventListener("geocode-marker-cleared", () => {
+    input.value = "";
+    results.classList.add("hidden");
+    results.innerHTML = "";
+    clearBtn.classList.add("hidden");
   });
 
   document.addEventListener("click", (e) => {

@@ -187,7 +187,7 @@ Ces jeux de données sont rattachés directement à un quartier via leur `locati
 
 Exemple typique :
 
-- certains prix immobiliers DVF déjà disponibles à l’échelle arrondissement
+- certaines métriques sans géolocalisation exploitable
 
 Dans ce cas, la logique actuelle est :
 
@@ -197,6 +197,16 @@ Dans ce cas, la logique actuelle est :
 Autrement dit :
 
 - le quartier hérite de la valeur arrondissement quand la granularité source ne permet pas mieux
+
+### Cas particulier : DVF géolocalisé
+
+Le jeu `DVF géolocalisées` fournit des coordonnées WGS84 transaction par transaction.
+
+Conséquence :
+
+- le prix immobilier n’a plus besoin d’être seulement hérité de l’arrondissement
+- on peut recalculer un prix médian au m² directement à la maille quartier administratif
+- l’historique reste exploitable par `annee` à partir de `date_mutation`
 
 ## Logique de score transport au niveau quartier
 

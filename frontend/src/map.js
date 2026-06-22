@@ -4,24 +4,94 @@ let map = null;
 let popup = null;
 let isDark = false;
 let currentGeoJSON = { type: "FeatureCollection", features: [] };
+let currentMarker = null;
+let currentScale = {
+  min: 0,
+  max: 100,
+  steps: [
+    [0, "#ef4444"],
+    [25, "#f97316"],
+    [50, "#f59e0b"],
+    [75, "#84cc16"],
+    [100, "#22c55e"],
+  ],
+};
+const currentScalesByIndicator = {};
+const REVERSED_SCALE_INDICATORS = new Set(["prix_m2_median"]);
 
 const STYLES = {
   light: "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json",
   dark:  "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json",
 };
 
-const COLOR_STEPS = [
-  [0,   "#ef4444"],
-  [25,  "#f97316"],
-  [50,  "#f59e0b"],
-  [75,  "#84cc16"],
-  [100, "#22c55e"],
-];
-
 function scoreToColor(steps) {
   return ["interpolate", ["linear"], ["get", "__score"]].concat(
     steps.flatMap(([v, c]) => [v, c])
   );
+}
+
+function computeScale(values) {
+  const finiteValues = values.filter((value) => Number.isFinite(value));
+  if (!finiteValues.length) {
+    return {
+      min: 0,
+      max: 100,
+      steps: [
+        [0, "#ef4444"],
+        [25, "#f97316"],
+        [50, "#f59e0b"],
+        [75, "#84cc16"],
+        [100, "#22c55e"],
+      ],
+    };
+  }
+
+  const min = Math.min(...finiteValues);
+  const max = Math.max(...finiteValues);
+  if (min === max) {
+    return {
+      min,
+      max,
+      steps: [
+        [min, "#f59e0b"],
+        [min + 1e-6, "#f59e0b"],
+      ],
+    };
+  }
+
+  const range = max - min;
+  return {
+    min,
+    max,
+    steps: [
+      [min, "#ef4444"],
+      [min + range * 0.25, "#f97316"],
+      [min + range * 0.5, "#f59e0b"],
+      [min + range * 0.75, "#84cc16"],
+      [max, "#22c55e"],
+    ],
+  };
+}
+
+function reverseScale(scale) {
+  return {
+    min: scale.min,
+    max: scale.max,
+    steps: [...scale.steps].reverse(),
+  };
+}
+
+function toNumericOrNaN(value) {
+  return value == null ? NaN : Number(value);
+}
+
+function applyCurrentScale() {
+  if (!map?.getLayer("quartiers-fill")) return;
+  map.setPaintProperty("quartiers-fill", "fill-color", scoreToColor(currentScale.steps));
+}
+
+function getLineOpacity(isActive) {
+  return isActive ? 0.95 : 0;
 }
 
 function setupLayers() {
@@ -49,7 +119,7 @@ function setupLayers() {
     type: "fill",
     source: "quartiers",
     paint: {
-      "fill-color": scoreToColor(COLOR_STEPS),
+      "fill-color": scoreToColor(currentScale.steps),
       "fill-opacity": 0.75,
     },
   });
@@ -75,6 +145,54 @@ function setupLayers() {
       "line-color": "#ffffff",
       "line-width": 2.5,
       "line-opacity": 0.9,
+    },
+  });
+
+  map.addLayer({
+    id: "compare-arr1-border",
+    type: "line",
+    source: "quartiers",
+    filter: ["==", "arrondissement", -1],
+    paint: {
+      "line-color": "#111827",
+      "line-width": 4,
+      "line-opacity": 0,
+    },
+  });
+
+  map.addLayer({
+    id: "compare-arr2-border",
+    type: "line",
+    source: "quartiers",
+    filter: ["==", "arrondissement", -1],
+    paint: {
+      "line-color": "#dc2626",
+      "line-width": 4,
+      "line-opacity": 0,
+    },
+  });
+
+  map.addLayer({
+    id: "compare-quartier1-border",
+    type: "line",
+    source: "quartiers",
+    filter: ["==", "quartier_id", ""],
+    paint: {
+      "line-color": "#111827",
+      "line-width": 5,
+      "line-opacity": 0,
+    },
+  });
+
+  map.addLayer({
+    id: "compare-quartier2-border",
+    type: "line",
+    source: "quartiers",
+    filter: ["==", "quartier_id", ""],
+    paint: {
+      "line-color": "#dc2626",
+      "line-width": 5,
+      "line-opacity": 0,
     },
   });
 
@@ -176,6 +294,7 @@ export function setMapTheme(dark, onReady) {
       setupLayers();
       const src = map.getSource("quartiers");
       if (src) src.setData(currentGeoJSON);
+      applyCurrentScale();
       onReady?.();
     } else {
       setTimeout(waitForStyle, 80);
@@ -196,11 +315,33 @@ export function updateMapData(geojson, indicateur, indicateurLabel) {
     },
   }));
 
+  const baseScale = computeScale(
+    features.map((feature) => {
+      return toNumericOrNaN(feature.properties.__score);
+    })
+  );
+  currentScale = REVERSED_SCALE_INDICATORS.has(indicateur)
+    ? reverseScale(baseScale)
+    : baseScale;
+  Object.assign(currentScalesByIndicator, {
+    score_global: computeScale(features.map((feature) => toNumericOrNaN(feature.properties.score_global))),
+    score_qualite_vie: computeScale(features.map((feature) => toNumericOrNaN(feature.properties.score_qualite_vie))),
+    score_transports: computeScale(features.map((feature) => toNumericOrNaN(feature.properties.score_transports))),
+    score_loisirs: computeScale(features.map((feature) => toNumericOrNaN(feature.properties.score_loisirs))),
+    score_services: computeScale(features.map((feature) => toNumericOrNaN(feature.properties.score_services))),
+    prix_m2_median: computeScale(features.map((feature) => toNumericOrNaN(feature.properties.prix_m2_median))),
+    nb_logements_sociaux: computeScale(features.map((feature) => toNumericOrNaN(feature.properties.nb_logements_sociaux))),
+  });
   currentGeoJSON = { type: "FeatureCollection", features };
 
-  if (!map || !map.isStyleLoaded()) return;
+  if (!map || !map.isStyleLoaded()) {
+    return { min: currentScale.min, max: currentScale.max };
+  }
   const src = map.getSource("quartiers");
   if (src) src.setData(currentGeoJSON);
+  applyCurrentScale();
+
+  return { min: currentScale.min, max: currentScale.max };
 }
 
 export function flyToLngLat(lng, lat, zoom = 14) {
@@ -209,9 +350,56 @@ export function flyToLngLat(lng, lat, zoom = 14) {
 
 export function placeMarker(lng, lat, label) {
   if (!map) return;
-  new maplibregl.Marker({ color: "#3b82f6" })
+  clearMarker();
+  const popup = new maplibregl.Popup({ closeButton: true, closeOnClick: false }).setText(label);
+  currentMarker = new maplibregl.Marker({ color: "#3b82f6" })
     .setLngLat([lng, lat])
-    .setPopup(new maplibregl.Popup().setText(label))
-    .addTo(map)
-    .togglePopup();
+    .setPopup(popup)
+    .addTo(map);
+  popup.on("close", () => {
+    if (currentMarker) {
+      currentMarker.remove();
+      currentMarker = null;
+    }
+    window.dispatchEvent(new CustomEvent("geocode-marker-cleared"));
+  });
+  currentMarker.togglePopup();
+}
+
+export function clearMarker() {
+  if (!currentMarker) return;
+  currentMarker.remove();
+  currentMarker = null;
+  window.dispatchEvent(new CustomEvent("geocode-marker-cleared"));
+}
+
+export function getIndicatorScale(indicator) {
+  return currentScalesByIndicator[indicator] ?? { min: 0, max: 100 };
+}
+
+export function setCompareHighlights({
+  arr1 = null,
+  arr2 = null,
+  quartier1 = null,
+  quartier2 = null,
+} = {}) {
+  if (!map) return;
+
+  const hasArr1 = Number.isInteger(arr1) && arr1 > 0;
+  const hasArr2 = Number.isInteger(arr2) && arr2 > 0;
+  const hasQuartier1 = typeof quartier1 === "string" && quartier1.length > 0;
+  const hasQuartier2 = typeof quartier2 === "string" && quartier2.length > 0;
+
+  map.setFilter("compare-arr1-border", ["==", "arrondissement", hasArr1 ? arr1 : -1]);
+  map.setFilter("compare-arr2-border", ["==", "arrondissement", hasArr2 ? arr2 : -1]);
+  map.setFilter("compare-quartier1-border", ["==", "quartier_id", hasQuartier1 ? quartier1 : ""]);
+  map.setFilter("compare-quartier2-border", ["==", "quartier_id", hasQuartier2 ? quartier2 : ""]);
+  map.setPaintProperty("compare-arr1-border", "line-opacity", getLineOpacity(hasArr1));
+  map.setPaintProperty("compare-arr2-border", "line-opacity", getLineOpacity(hasArr2));
+  map.setPaintProperty("compare-quartier1-border", "line-opacity", getLineOpacity(hasQuartier1));
+  map.setPaintProperty("compare-quartier2-border", "line-opacity", getLineOpacity(hasQuartier2));
+}
+
+export function clearCompareHighlights() {
+  setCompareHighlights();
 }

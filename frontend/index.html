@@ -50,7 +50,7 @@
             <option value="score_loisirs">Loisirs</option>
             <option value="score_services">Services publics</option>
             <option value="prix_m2_median">Prix m² médian</option>
-            <option value="pct_logements_sociaux">% Logements sociaux</option>
+            <option value="nb_logements_sociaux">Logements sociaux</option>
           </select>
         </div>
 
@@ -69,14 +69,17 @@
             <svg class="ctrl-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
             Recherche d'adresse
           </label>
-          <input id="geocode-input" type="text" placeholder="Ex : 10 rue de Rivoli…" autocomplete="off"
-            aria-label="Rechercher une adresse à Paris" aria-autocomplete="list" aria-controls="geocode-results" />
-          <ul id="geocode-results" class="autocomplete-list hidden" role="listbox" aria-label="Suggestions d'adresses"></ul>
+          <div id="geocode-box" class="geocode-box">
+            <input id="geocode-input" type="text" placeholder="Ex : 10 rue de Rivoli…" autocomplete="off"
+              aria-label="Rechercher une adresse à Paris" aria-autocomplete="list" aria-controls="geocode-results" />
+            <button type="button" id="geocode-clear" class="btn-input-clear hidden" aria-label="Effacer la recherche">✕</button>
+            <ul id="geocode-results" class="autocomplete-list hidden" role="listbox" aria-label="Suggestions d'adresses"></ul>
+          </div>
         </div>
 
         <button id="compare-btn" type="button" class="btn-compare">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M18 3l3 3-3 3"></path><path d="M6 21l-3-3 3-3"></path><line x1="21" y1="6" x2="3" y2="6"></line><line x1="21" y1="18" x2="3" y2="18"></line></svg>
-          Comparer deux arrondissements
+          Comparer deux zones
         </button>
 
       </div>
@@ -106,6 +109,7 @@
           <div class="legend-gradient" id="legend-gradient" aria-hidden="true"></div>
           <span id="legend-max">100</span>
         </div>
+        <div class="legend-note" id="legend-note"></div>
       </div>
 
     </aside>
@@ -118,20 +122,32 @@
   </div>
 
   <!-- Panel comparaison (overlay) -->
-  <div id="compare-panel" class="compare-panel hidden" role="dialog" aria-modal="true" aria-label="Comparer deux arrondissements">
+  <div id="compare-panel" class="compare-panel hidden" role="dialog" aria-modal="true" aria-label="Comparer deux zones">
     <div class="compare-header">
-      <h2>Comparer deux arrondissements</h2>
+      <h2>Comparer deux zones</h2>
       <button type="button" id="compare-close" class="btn-icon-close" aria-label="Fermer">✕</button>
     </div>
     <div class="compare-selects">
-      <select id="compare-arr1" title="Premier arrondissement" aria-label="Premier arrondissement à comparer"></select>
+      <div class="compare-side">
+        <select id="compare-arr1" title="Premier arrondissement" aria-label="Premier arrondissement à comparer"></select>
+        <select id="compare-quartier1" title="Premier quartier administratif" aria-label="Premier quartier administratif à comparer"></select>
+      </div>
       <span class="vs-badge" aria-hidden="true">vs</span>
-      <select id="compare-arr2" title="Deuxième arrondissement" aria-label="Deuxième arrondissement à comparer"></select>
+      <div class="compare-side">
+        <select id="compare-arr2" title="Deuxième arrondissement" aria-label="Deuxième arrondissement à comparer"></select>
+        <select id="compare-quartier2" title="Deuxième quartier administratif" aria-label="Deuxième quartier administratif à comparer"></select>
+      </div>
       <button type="button" id="compare-go" class="btn-primary">Comparer</button>
     </div>
+    <div id="compare-summary" class="compare-summary" aria-live="polite"></div>
+    <div id="compare-explain" class="compare-explain"></div>
     <div id="compare-radar-container">
       <canvas id="compare-radar" aria-label="Graphique radar de comparaison"></canvas>
     </div>
+    <details id="compare-quartiers" class="compare-quartiers">
+      <summary>Voir le détail de sélection</summary>
+      <div id="compare-quartiers-content"></div>
+    </details>
     <div id="compare-table" role="region" aria-label="Tableau de comparaison"></div>
   </div>
 

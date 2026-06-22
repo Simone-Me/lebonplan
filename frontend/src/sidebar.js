@@ -7,19 +7,31 @@ function fmt(v, unit = "") {
   return v != null ? `${Number(v).toLocaleString("fr-FR")}${unit}` : "—";
 }
 
+function normalizeForDisplay(value, scale) {
+  if (value == null) return 0;
+  const min = scale?.min ?? 0;
+  const max = scale?.max ?? 100;
+  if (!Number.isFinite(min) || !Number.isFinite(max) || min === max) return 50;
+  const pct = ((Number(value) - min) / (max - min)) * 100;
+  return Math.max(0, Math.min(100, pct));
+}
+
 function scoreColor(pct) {
-  if (pct >= 66) return "#22c55e";
-  if (pct >= 33) return "#f59e0b";
+  if (pct >= 75) return "#22c55e";
+  if (pct >= 50) return "#84cc16";
+  if (pct >= 25) return "#f59e0b";
+  if (pct > 0) return "#f97316";
   return "#ef4444";
 }
 
-function scoreCard(label, value, fullWidth = false) {
-  const pct = Math.round(value ?? 0);
+function scoreCard(label, value, scale, fullWidth = false) {
+  const pct = normalizeForDisplay(value, scale);
   const color = scoreColor(pct);
+  const displayValue = value != null ? Math.round(value) : "—";
   return `
     <div class="score-card${fullWidth ? " full-width" : ""}">
       <div class="score-card-label">${label}</div>
-      <div class="score-card-value" style="color:${color}">${pct}</div>
+      <div class="score-card-value" style="color:${color}">${displayValue}</div>
       <div class="score-track">
         <div class="score-fill" style="width:${pct}%;background:${color}"></div>
       </div>
@@ -43,7 +55,7 @@ function detailSection(title, rows) {
     </div>`;
 }
 
-export async function openSidebar(quartierSelection, annee) {
+export async function openSidebar(quartierSelection, annee, getIndicatorScale) {
   const quartierId = typeof quartierSelection === "object"
     ? quartierSelection.quartier_id
     : quartierSelection;
@@ -68,6 +80,13 @@ export async function openSidebar(quartierSelection, annee) {
       arr ? `${arr}e arrondissement` : null,
       code ? `#${code}` : null,
     ].filter(Boolean).join(" · ");
+    const scales = {
+      score_global: getIndicatorScale?.("score_global"),
+      score_qualite_vie: getIndicatorScale?.("score_qualite_vie"),
+      score_transports: getIndicatorScale?.("score_transports"),
+      score_loisirs: getIndicatorScale?.("score_loisirs"),
+      score_services: getIndicatorScale?.("score_services"),
+    };
 
     content.innerHTML = `
       <div class="q-header">
@@ -84,11 +103,11 @@ export async function openSidebar(quartierSelection, annee) {
       <!-- Tab: Scores -->
       <div class="tab-panel active" id="tab-scores">
         <div class="scores-grid">
-          ${scoreCard("Score global",      kpis.score_global,      true)}
-          ${scoreCard("Qualité de vie",    kpis.score_qualite_vie)}
-          ${scoreCard("Transports",        kpis.score_transports)}
-          ${scoreCard("Loisirs",           kpis.score_loisirs)}
-          ${scoreCard("Services publics",  kpis.score_services)}
+          ${scoreCard("Score global",      kpis.score_global,      scales.score_global, true)}
+          ${scoreCard("Qualité de vie",    kpis.score_qualite_vie, scales.score_qualite_vie)}
+          ${scoreCard("Transports",        kpis.score_transports,  scales.score_transports)}
+          ${scoreCard("Loisirs",           kpis.score_loisirs,     scales.score_loisirs)}
+          ${scoreCard("Services publics",  kpis.score_services,    scales.score_services)}
         </div>
       </div>
 
@@ -96,8 +115,8 @@ export async function openSidebar(quartierSelection, annee) {
       <div class="tab-panel" id="tab-details">
         ${detailSection("Immobilier", [
           ["Prix m² médian",       fmt(kpis.prix_m2_median, " €")],
-          ["Logements sociaux",    fmt(kpis.pct_logements_sociaux, " %")],
-          ["Nb logements sociaux", fmt(kpis.nb_logements_sociaux)],
+          ["Logements sociaux",    fmt(kpis.nb_logements_sociaux)],
+          ["Part logements sociaux", fmt(kpis.pct_logements_sociaux, " %")],
         ])}
         ${detailSection("Qualité de vie", [
           ["Espaces verts",       fmt(kpis.nb_espaces_verts)],

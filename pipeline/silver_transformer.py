@@ -99,12 +99,65 @@ def latlon_cols_to_geojson(lat_col, lon_col) -> list:
     for lat, lon in zip(lat_col, lon_col):
         try:
             if pd.notna(lat) and pd.notna(lon):
-                result.append({"type": "Point", "coordinates": [float(lon), float(lat)]})
+                lat_f = float(lat)
+                lon_f = float(lon)
+                if lat_f == 0 and lon_f == 0:
+                    result.append(None)
+                elif -90 <= lat_f <= 90 and -180 <= lon_f <= 180:
+                    result.append({"type": "Point", "coordinates": [lon_f, lat_f]})
+                else:
+                    result.append(None)
             else:
                 result.append(None)
         except Exception:
             result.append(None)
     return result
+
+
+def _fill_location_from_latlon(df: pd.DataFrame, lat_col: str, lon_col: str) -> pd.DataFrame:
+    """Alimente `location` depuis une paire de colonnes latitude/longitude."""
+    if lat_col not in df.columns or lon_col not in df.columns:
+        return df
+
+    points = pd.Series(latlon_cols_to_geojson(df[lat_col], df[lon_col]), index=df.index, dtype="object")
+    if "location" not in df.columns:
+        df["location"] = points
+        return df
+
+    missing_mask = df["location"].isna()
+    if missing_mask.any():
+        df.loc[missing_mask, "location"] = points.loc[missing_mask]
+    return df
+
+
+def _extract_location_from_locations(value) -> dict | None:
+    """Extrait un point GeoJSON depuis le payload `locations` des événements Paris."""
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return None
+
+    payload = value
+    if isinstance(value, str):
+        try:
+            payload = json.loads(value)
+        except Exception:
+            return None
+
+    if not isinstance(payload, list):
+        return None
+
+    for entry in payload:
+        if not isinstance(entry, dict):
+            continue
+        raw_coords = entry.get("address_lat_lon")
+        if not raw_coords:
+            continue
+        parts = [part.strip() for part in str(raw_coords).split(",")]
+        if len(parts) != 2:
+            continue
+        point = latlon_cols_to_geojson([parts[0]], [parts[1]])[0]
+        if point is not None:
+            return point
+    return None
 
 
 def _extract_polygon_rings(geometry: dict) -> list[list[list[float]]]:
@@ -217,13 +270,24 @@ def _base_geo(df: pd.DataFrame) -> pd.DataFrame:
         ("ylatitude", "xlongitude"),
         ("arrgeopoint.lat", "arrgeopoint.lon"),
         ("coordonnees_geo.lat", "coordonnees_geo.lon"),
+        ("geo.lat", "geo.lon"),
+        ("geolocalisation.lat", "geolocalisation.lon"),
+        ("geo_point_2d.lat", "geo_point_2d.lon"),
+        ("lat_lon.lat", "lat_lon.lon"),
     ]:
-        if lat_c in df.columns and lon_c in df.columns and "location" not in df.columns:
-            df["location"] = latlon_cols_to_geojson(df[lat_c], df[lon_c])
+        df = _fill_location_from_latlon(df, lat_c, lon_c)
+    if "locations" in df.columns:
+        derived_locations = df["locations"].apply(_extract_location_from_locations)
+        if "location" not in df.columns:
+            df["location"] = derived_locations
+        else:
+            missing_mask = df["location"].isna()
+            if missing_mask.any():
+                df.loc[missing_mask, "location"] = derived_locations.loc[missing_mask]
     # Arrondissement
     for col in [
         "arrondissement", "cp_arrondissement", "code_postal", "arr_insee", "arr_libelle",
-        "nom_arrondissement", "arrtown", "arrpostalregion", "code_insee_commune",
+        "nom_arrondissement", "arrtown", "arrpostalregion", "code_insee_commune", "code_insee",
         "nom_arrondissement_communes",
     ]:
         if col in df.columns:
@@ -440,9 +504,36 @@ def transform_passthrough(df: pd.DataFrame) -> pd.DataFrame:
 
 def transform_dvf(df: pd.DataFrame) -> pd.DataFrame:
     """
-    DVF+ Etalab : extrait prix médian m², arrondissement et année.
-    Colonnes clés : annee, code_insee, prix_m2_median (ou med_prix_m2_ventes)
+    DVF Etalab :
+    - mode historique géolocalisé : mutations unitaires avec coordonnées
+    - compatibilité conservée avec l'ancien format agrégé si présent
     """
+    if "date_mutation" in df.columns:
+        if "longitude" in df.columns and "latitude" in df.columns:
+            df["location"] = latlon_cols_to_geojson(df["latitude"], df["longitude"])
+        if "code_commune" in df.columns:
+            df["arrondissement"] = df["code_commune"].apply(parse_arrondissement)
+            df["code_insee"] = df["code_commune"]
+        elif "code_insee" in df.columns:
+            df["arrondissement"] = df["code_insee"].apply(parse_arrondissement)
+
+        df["annee"] = pd.to_datetime(df["date_mutation"], errors="coerce").dt.year
+        df["valeur_fonciere"] = pd.to_numeric(df.get("valeur_fonciere"), errors="coerce")
+        df["surface_reelle_bati"] = pd.to_numeric(df.get("surface_reelle_bati"), errors="coerce")
+        df["prix_m2"] = (
+            df["valeur_fonciere"] / df["surface_reelle_bati"]
+        ).where(df["surface_reelle_bati"].fillna(0) > 0)
+
+        keep = [
+            "id_mutation", "date_mutation", "annee", "numero_disposition",
+            "nature_mutation", "valeur_fonciere", "code_postal", "code_insee",
+            "nom_commune", "arrondissement", "type_local", "surface_reelle_bati",
+            "nombre_pieces_principales", "surface_terrain", "nombre_lots",
+            "longitude", "latitude", "location", "prix_m2", "source_year",
+            "_ingested_at", "_dataset_id", "_indicateur", "_signe", "_source",
+        ]
+        return df[[c for c in keep if c in df.columns]]
+
     # Normalise le nom de colonne prix selon la version de l'API
     for col in ["med_prix_m2_ventes", "prix_m2_median", "med_prixm2_ventes"]:
         if col in df.columns:

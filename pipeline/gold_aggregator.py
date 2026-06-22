@@ -14,6 +14,7 @@ import logging
 import math
 import re
 import json
+import statistics
 import requests
 from pymongo import MongoClient
 from sqlalchemy import create_engine, text
@@ -142,6 +143,13 @@ def _as_float(value, default: float = 0.0) -> float:
         return default
 
 
+def _median(values: list[float]) -> float | None:
+    cleaned = [float(v) for v in values if v is not None and not math.isnan(float(v))]
+    if not cleaned:
+        return None
+    return round(float(statistics.median(cleaned)), 2)
+
+
 def _is_truthy(value) -> bool:
     if isinstance(value, bool):
         return value
@@ -219,11 +227,50 @@ def _load_quartier_shapes():
 
     shapes = []
     quartiers_by_id = {}
+    geojson_features = []
+
     try:
         response = requests.get(QUARTIERS_GEO_URL, timeout=30)
         response.raise_for_status()
-        geojson = response.json()
-        for feature in geojson.get("features", []):
+        geojson_features = response.json().get("features", [])
+    except Exception as exc:
+        log.warning(f"  Impossible de charger les polygones de quartiers depuis l'Open Data Paris : {exc}")
+
+    if not geojson_features:
+        try:
+            engine = get_engine()
+            with engine.connect() as conn:
+                rows = conn.execute(text("""
+                    SELECT
+                        quartier_id,
+                        quartier_code,
+                        arrondissement,
+                        nom,
+                        ST_AsGeoJSON(geom) AS geometry
+                    FROM gold.quartiers_geo
+                    ORDER BY arrondissement NULLS LAST, nom
+                """)).mappings().all()
+            for row in rows:
+                geometry = row["geometry"]
+                if isinstance(geometry, str):
+                    geometry = json.loads(geometry)
+                geojson_features.append({
+                    "type": "Feature",
+                    "geometry": geometry,
+                    "properties": {
+                        "quartier_id": row["quartier_id"],
+                        "quartier_code": row["quartier_code"],
+                        "arrondissement": row["arrondissement"],
+                        "nom": row["nom"],
+                    },
+                })
+            if geojson_features:
+                log.info("  Polygones quartiers rechargés depuis gold.quartiers_geo")
+        except Exception as exc:
+            log.warning(f"  Impossible de charger les polygones de quartiers depuis PostgreSQL : {exc}")
+
+    try:
+        for feature in geojson_features:
             props = feature.get("properties", {})
             quartier_id = _first_present(props, [
                 "n_sq_qu", "id_quartier", "quartier_id", "c_qu", "code_qu",
@@ -255,7 +302,7 @@ def _load_quartier_shapes():
             shapes.append(info)
             quartiers_by_id[info["quartier_id"]] = info
     except Exception as exc:
-        log.warning(f"  Impossible de charger les polygones de quartiers pour l'agrégation fine : {exc}")
+        log.warning(f"  Impossible de préparer les polygones de quartiers pour l'agrégation fine : {exc}")
         shapes = []
         quartiers_by_id = {}
 
@@ -651,33 +698,33 @@ def agg_services(db) -> dict:
 
 
 def agg_immobilier(db, annee: int) -> dict:
-    """Prix m² médian (DVF+) + logements sociaux par arrondissement."""
+    """Prix m² médian géolocalisé + logements sociaux par arrondissement."""
     ls = count_by_arr(db["silver_logements_sociaux"])
+    prix_by_arr = {arr: [] for arr in ARRONDISSEMENTS}
 
-    # Prix m² médian depuis silver_dvf pour l'année demandée
-    prix_m2 = {}
-    for doc in db["silver_dvf"].find({"annee": annee, "arrondissement": {"$in": ARRONDISSEMENTS}}):
-        arr = doc.get("arrondissement")
-        val = doc.get("prix_m2_median")
-        if arr and val is not None:
-            prix_m2[arr] = float(val)
+    available_years = sorted(v for v in db["silver_dvf"].distinct("annee") if isinstance(v, int))
+    target_year = annee if annee in available_years else (max([y for y in available_years if y <= annee], default=None))
 
-    # Fallback : toutes les lignes disponibles (pas de filtre année)
-    if not prix_m2:
-        for doc in db["silver_dvf"].find(
-            {"arrondissement": {"$in": ARRONDISSEMENTS}, "prix_m2_median": {"$exists": True}}
-        ):
+    if target_year is not None:
+        dvf_query = {
+            "annee": target_year,
+            "arrondissement": {"$in": ARRONDISSEMENTS},
+            "nature_mutation": "Vente",
+            "type_local": "Appartement",
+            "prix_m2": {"$exists": True, "$ne": None},
+        }
+        for doc in db["silver_dvf"].find(dvf_query):
             arr = doc.get("arrondissement")
-            val = doc.get("prix_m2_median")
-            if arr and val is not None and arr not in prix_m2:
-                prix_m2[arr] = float(val)
+            prix = _as_float(doc.get("prix_m2"), None)
+            if arr in prix_by_arr and prix and 500 <= prix <= 50_000:
+                prix_by_arr[arr].append(prix)
 
     result = {}
     for arr in ARRONDISSEMENTS:
         result[arr] = {
             "nb_logements_sociaux":  safe_get(ls, arr),
             "pct_logements_sociaux": None,
-            "prix_m2_median":        prix_m2.get(arr),
+            "prix_m2_median":        _median(prix_by_arr[arr]),
         }
     return result
 
@@ -758,6 +805,29 @@ def agg_quartiers(db, annee: int, arrondissement_kpis: dict) -> dict:
         result[qid]["pct_logements_sociaux"] = arr_row.get("pct_logements_sociaux")
         result[qid]["score_air_no2"] = arr_row.get("score_air_no2")
         result[qid]["score_air_pm25"] = arr_row.get("score_air_pm25")
+
+    # Immobilier fin : médiane réelle du prix m² au niveau quartier si disponible
+    available_years = sorted(v for v in db["silver_dvf"].distinct("annee") if isinstance(v, int))
+    target_year = annee if annee in available_years else (max([y for y in available_years if y <= annee], default=None))
+    if target_year is not None:
+        prix_by_quartier = {qid: [] for qid in quartier_ids}
+        dvf_query = {
+            "annee": target_year,
+            "nature_mutation": "Vente",
+            "type_local": "Appartement",
+            "prix_m2": {"$exists": True, "$ne": None},
+        }
+        for doc in db["silver_dvf"].find(dvf_query):
+            quartier = _resolve_quartier_meta(doc)
+            if not quartier:
+                continue
+            prix = _as_float(doc.get("prix_m2"), None)
+            if prix and 500 <= prix <= 50_000:
+                prix_by_quartier[quartier["quartier_id"]].append(prix)
+        for qid in quartier_ids:
+            prix_quartier = _median(prix_by_quartier[qid])
+            if prix_quartier is not None:
+                result[qid]["prix_m2_median"] = prix_quartier
 
     # Qualité de vie
     for field, coll_name in [
@@ -1305,11 +1375,9 @@ def upsert_quartier_kpis(engine, kpis_by_quartier: dict, annee: int):
 def run(annee: int | None = None):
     from datetime import date
     from init_db import run as init_gold_schema
-    if annee is None:
-        annee = date.today().year
 
     log.info("=" * 60)
-    log.info(f"Gold Aggregator — annee={annee}")
+    log.info(f"Gold Aggregator — annee={annee or 'auto'}")
     log.info("=" * 60)
 
     log.info("Vérification du schéma Gold...")
@@ -1335,48 +1403,57 @@ def run(annee: int | None = None):
 
     log.info("\n[6/8] Agrégation services publics")
     sv = agg_services(db)
+    current_year = date.today().year
+    dvf_years = sorted(v for v in db["silver_dvf"].distinct("annee") if isinstance(v, int))
+    if annee is not None:
+        years_to_process = [annee]
+    else:
+        years_to_process = dvf_years[:] if dvf_years else [current_year]
+        if current_year not in years_to_process:
+            years_to_process.append(current_year)
 
-    log.info("\n[7/8] Agrégation immobilier (DVF+ prix m²)")
-    im = agg_immobilier(db, annee)
+    for target_year in years_to_process:
+        log.info(f"\n[7/8] Agrégation immobilier (DVF+ prix m²) — {target_year}")
+        im = agg_immobilier(db, target_year)
 
-    # Fusion + score global
-    kpis_by_arr = {}
-    for arr in ARRONDISSEMENTS:
-        row = {}
-        row.update(qv.get(arr, {}))
-        row.update(tr.get(arr, {}))
-        row.update(lo.get(arr, {}))
-        row.update(sv.get(arr, {}))
-        row.update(im.get(arr, {}))
+        kpis_by_arr = {}
+        for arr in ARRONDISSEMENTS:
+            row = {}
+            row.update(qv.get(arr, {}))
+            row.update(tr.get(arr, {}))
+            row.update(lo.get(arr, {}))
+            row.update(sv.get(arr, {}))
+            row.update(im.get(arr, {}))
 
-        s_qv = row.get("score_qualite_vie", 0) or 0
-        s_tr = row.get("score_transports", 0)  or 0
-        s_lo = row.get("score_loisirs", 0)     or 0
-        s_sv = row.get("score_services", 0)    or 0
-        row["score_global"] = round((s_qv + s_tr + s_lo + s_sv) / 4, 2)
+            s_qv = row.get("score_qualite_vie", 0) or 0
+            s_tr = row.get("score_transports", 0)  or 0
+            s_lo = row.get("score_loisirs", 0)     or 0
+            s_sv = row.get("score_services", 0)    or 0
+            row["score_global"] = round((s_qv + s_tr + s_lo + s_sv) / 4, 2)
 
-        kpis_by_arr[arr] = row
+            kpis_by_arr[arr] = row
 
-    upsert_kpis(engine, kpis_by_arr, annee)
+        upsert_kpis(engine, kpis_by_arr, target_year)
 
-    log.info("\n[8/8] Agrégation KPI quartiers administratifs")
-    kpis_by_quartier = agg_quartiers(db, annee, kpis_by_arr)
-    upsert_quartier_kpis(engine, kpis_by_quartier, annee)
+        log.info(f"\n[8/8] Agrégation KPI quartiers administratifs — {target_year}")
+        kpis_by_quartier = agg_quartiers(db, target_year, kpis_by_arr)
+        upsert_quartier_kpis(engine, kpis_by_quartier, target_year)
+
+        log.info("\n" + "=" * 60)
+        log.info(f"RAPPORT GOLD — {target_year}")
+        log.info("=" * 60)
+        for arr in ARRONDISSEMENTS:
+            k = kpis_by_arr[arr]
+            log.info(
+                f"  {arr:>2}e  QV={k.get('score_qualite_vie',0):5.1f}  "
+                f"TR={k.get('score_transports',0):5.1f}  "
+                f"LO={k.get('score_loisirs',0):5.1f}  "
+                f"SV={k.get('score_services',0):5.1f}  "
+                f"→ GLOBAL={k.get('score_global',0):5.1f}"
+            )
+        log.info("=" * 60)
+
     engine.dispose()
-
-    log.info("\n" + "=" * 60)
-    log.info("RAPPORT GOLD")
-    log.info("=" * 60)
-    for arr in ARRONDISSEMENTS:
-        k = kpis_by_arr[arr]
-        log.info(
-            f"  {arr:>2}e  QV={k.get('score_qualite_vie',0):5.1f}  "
-            f"TR={k.get('score_transports',0):5.1f}  "
-            f"LO={k.get('score_loisirs',0):5.1f}  "
-            f"SV={k.get('score_services',0):5.1f}  "
-            f"→ GLOBAL={k.get('score_global',0):5.1f}"
-        )
-    log.info("=" * 60)
 
 
 if __name__ == "__main__":
