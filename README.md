@@ -362,6 +362,7 @@ Pour la logique détaillée : `docs/carte-detaillee-paris.md`
 |-----|---------|
 | `v0.1.0` | Bronze + Silver initiaux (15 datasets) |
 | `v0.2.0` | Bronze + Silver étendus (27 datasets, 4 indicateurs) + Gold + API + Frontend |
+| `v0.3.0` | JWT auth, tqdm, corrections Bronze (max_records, fallback exports/json) |
 | **`v0.4.0`** | **Revenus INSEE Filosofi, types logement, points carte, scheduler, docs** *(à venir)* |
 
 ---
