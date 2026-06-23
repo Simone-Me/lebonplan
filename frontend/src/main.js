@@ -4,6 +4,7 @@ import { openSidebar } from "./sidebar.js";
 import { initCompare } from "./compare.js";
 import { initGeocode } from "./geocode.js";
 import { fetchGeoJSON } from "./api.js";
+import { initAuth } from "./auth.js";
 
 const INDICATEUR_LABELS = {
   score_global:           "Score global",
@@ -18,6 +19,7 @@ const INDICATEUR_LABELS = {
 let currentAnnee = 2026;
 let currentIndicateur = "score_global";
 let currentScale = { min: 0, max: 100 };
+let hasLoadedData = false;
 
 function formatLegendValue(value) {
   if (!Number.isFinite(value)) return "—";
@@ -93,12 +95,16 @@ function init() {
     themeBtn.title = darkMap ? "Passer en mode clair" : "Passer en mode sombre";
   });
 
-  const waitForMap = setInterval(() => {
-    try {
-      refreshMap();
-      clearInterval(waitForMap);
-    } catch (_) {}
-  }, 500);
+  initAuth(() => {
+    if (hasLoadedData) return;
+    hasLoadedData = true;
+    const waitForMap = setInterval(() => {
+      try {
+        refreshMap();
+        clearInterval(waitForMap);
+      } catch (_) {}
+    }, 500);
+  });
 }
 
 // Attendre que le DOM soit prêt et le layout calculé

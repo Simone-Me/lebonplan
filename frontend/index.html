@@ -22,6 +22,10 @@
             <div class="brand-sub">Paris · Analyse urbaine</div>
           </div>
         </div>
+        <div class="header-actions">
+          <div id="auth-user" class="auth-user hidden" aria-live="polite"></div>
+          <button type="button" id="auth-logout" class="btn-auth hidden" aria-label="Se déconnecter">Se déconnecter</button>
+        </div>
         <button type="button" id="theme-toggle" class="btn-theme" title="Basculer le thème de la carte" aria-label="Basculer le thème de la carte">
           <svg id="theme-icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
             <circle cx="12" cy="12" r="5"></circle>
@@ -149,6 +153,22 @@
       <div id="compare-quartiers-content"></div>
     </details>
     <div id="compare-table" role="region" aria-label="Tableau de comparaison"></div>
+  </div>
+
+  <div id="auth-overlay" class="auth-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="auth-title">
+    <div class="auth-card">
+      <div class="auth-kicker">API securisee</div>
+      <h1 id="auth-title">Connexion requise</h1>
+      <p class="auth-copy">Le dashboard charge maintenant les donnees uniquement avec un jeton JWT valide.</p>
+      <form id="auth-form" class="auth-form">
+        <label for="auth-username">Utilisateur</label>
+        <input id="auth-username" name="username" type="text" autocomplete="username" required />
+        <label for="auth-password">Mot de passe</label>
+        <input id="auth-password" name="password" type="password" autocomplete="current-password" required />
+        <p id="auth-error" class="auth-error hidden" aria-live="polite"></p>
+        <button type="submit" class="btn-primary auth-submit">Se connecter</button>
+      </form>
+    </div>
   </div>
 
   <script type="module" src="/src/main.js"></script>

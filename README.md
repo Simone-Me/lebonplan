@@ -11,6 +11,26 @@ Explorer, comprendre et comparer les dynamiques du logement et de la qualité de
 
 ---
 
+## Dernières évolutions
+
+- Carte principale centrée sur les 80 quartiers administratifs
+- Choroplèthe avec échelle dynamique par indicateur, et palette inversée pour le `prix_m2_median`
+- DVF géolocalisé historique intégré pour recalculer le prix au m² par arrondissement et par quartier administratif
+- Recherche d’adresse avec suppression rapide du pin et reset
+- Comparaison enrichie : arrondissement vs arrondissement, ou quartier administratif vs quartier administratif
+- API sécurisée par JWT avec écran de connexion côté frontend
+- Route d’accueil `/` et `favicon.ico` ajoutées pour éviter le `404` direct sur la racine Uvicorn
+
+---
+
+## Journal de travail
+
+- `2026-06-23` : sécurisation de l’API FastAPI avec JWT Bearer, route `POST /api/auth/login`, vérification `GET /api/auth/me`, et protection des routes métier `/api/geo`, `/api/kpis`, `/api/timeline`, `/api/compare`
+- `2026-06-23` : ajout d’une connexion frontend avec stockage local du token, déconnexion, et rechargement de la carte uniquement après authentification
+- `2026-06-23` : correction de la racine API pour répondre sur `http://127.0.0.1:8000/` au lieu d’un `404`
+
+---
+
 ## Architecture
 
 ```
@@ -96,9 +116,33 @@ Le port `5433` évite le conflit fréquent avec un PostgreSQL Windows déjà lan
 ### 5. API
 
 ```bash
+python -m uvicorn api.main:app --reload --port 8000
+```
+ou esseyer avec
+```bash
 uvicorn api.main:app --reload --port 8000
 # Docs interactives : http://localhost:8000/docs
 ```
+
+Routes utiles :
+
+- Accueil API : `http://localhost:8000/`
+- Santé : `http://localhost:8000/api/health`
+- Swagger : `http://localhost:8000/docs`
+
+Variables d’authentification à définir dans `.env` :
+
+```env
+API_AUTH_USER=admin
+API_AUTH_PASSWORD=change-me
+API_JWT_SECRET=change-me-dev-jwt-secret
+API_JWT_EXPIRE_MINUTES=120
+API_CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
+```
+
+Option plus sûre :
+- laisser `API_AUTH_PASSWORD` vide
+- renseigner `API_AUTH_PASSWORD_HASH` au format `pbkdf2_sha256$iterations$salt$hash`
 
 ### 6. Frontend
 
@@ -173,6 +217,7 @@ npm run dev
 | Dataset | Source | Format |
 |---------|--------|--------|
 | Logements sociaux financés Paris | parisdata | API |
+| DVF géolocalisées Paris (historique 2021–2025) | data.gouv.fr | CSV.gz annuel |
 
 ---
 
@@ -217,6 +262,9 @@ Densité d'événements culturels, cinémas, terrasses, musées.
 
 | Méthode | Route | Description |
 |---------|-------|-------------|
+| GET | `/` | Accueil API + liens utiles |
+| POST | `/api/auth/login` | Authentification et émission du JWT |
+| GET | `/api/auth/me` | Vérification du token courant |
 | GET | `/api/geo/arrondissements` | GeoJSON 20 arrondissements + KPIs |
 | GET | `/api/geo/quartiers` | GeoJSON 80 quartiers administratifs + KPIs |
 | GET | `/api/kpis/{1-20}` | KPIs d'un arrondissement |
@@ -227,6 +275,13 @@ Densité d'événements culturels, cinémas, terrasses, musées.
 | GET | `/api/health` | Santé de l'API |
 
 Docs Swagger : `http://localhost:8000/docs`
+
+Sécurité actuelle :
+
+- `/api/auth/login`, `/api/health`, `/` et `/favicon.ico` restent publics
+- les routes métier exigent désormais `Authorization: Bearer <jwt>`
+- le frontend stocke le token puis le renvoie automatiquement sur les appels API
+- le CORS n’accepte plus `*` par défaut : il est limité aux origines listées dans `API_CORS_ORIGINS`
 
 ---
 
@@ -260,7 +315,8 @@ Docs Swagger : `http://localhost:8000/docs`
 │   ├── main.py               # FastAPI app
 │   ├── database.py           # SQLAlchemy engine
 │   ├── models.py             # Schemas Pydantic
-│   └── routers/              # geo, kpis, timeline, compare
+│   ├── security.py           # JWT, vérification Bearer, auth env
+│   └── routers/              # auth, geo, kpis, timeline, compare
 ├── frontend/
 │   ├── index.html
 │   └── src/                  # main.js, map.js, sidebar.js, compare.js, geocode.js
@@ -292,6 +348,18 @@ Logique de calcul :
 3. Les agrégations métier sont recalculées à l’échelle quartier.
 4. Les données ponctuelles géolocalisées, y compris les mutations DVF, peuvent être réagrégées à l’échelle quartier.
 5. L’API expose directement un GeoJSON quartier enrichi en KPI pour la choroplèthe.
+
+Comportement d’affichage actuel :
+
+- Scores composites : couleurs calculées sur l’étendue réelle des valeurs affichées
+- `prix_m2_median` : plus cher = rouge, moins cher = vert
+- `nb_logements_sociaux` : affichage direct sur la carte quand le pourcentage n’est pas disponible
+
+Comparaison :
+
+- arrondissement vs arrondissement
+- quartier administratif vs quartier administratif
+- pas de comparaison mixte arrondissement/quartier
 
 Pour le détail complet de cette logique et la façon de la modifier :
 - `docs/carte-detaillee-paris.md`
