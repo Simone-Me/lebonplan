@@ -361,15 +361,9 @@ Pour la logique détaillée : `docs/carte-detaillee-paris.md`
 | Tag | Contenu |
 |-----|---------|
 | `v0.1.0` | Bronze + Silver initiaux (15 datasets) |
-| `v0.2.0` | Bronze + Silver étendus (27 datasets, 4 indicateurs) |
-| `v0.3.0` | Gold layer (PostgreSQL/PostGIS) |
-| `v0.4.0` | API FastAPI + Docker |
-| `v1.0.0` | Frontend complet (MapLibre + timeline + comparaison + géocodage BAN) |
-| `v1.1.0` | Revenus médians INSEE Filosofi + taux_effort_achat |
-| `v1.2.0` | Répartition types de logement + donut chart |
-| `v1.3.0` | Couches de points togglables sur la carte |
-| `v1.4.0` | Scheduler automatique pipeline (APScheduler + Docker) |
-| `v1.5.0` | Data catalog + benchmarks + ADR architecture |
+| `v0.2.0` | Bronze + Silver étendus (27 datasets, 4 indicateurs) + Gold + API + Frontend |
+| `v0.3.0` | JWT auth, tqdm, corrections Bronze (max_records, fallback exports/json) |
+| **`v0.4.0`** | **Revenus INSEE Filosofi, types logement, points carte, scheduler, docs** *(à venir)* |
 
 ---
 
