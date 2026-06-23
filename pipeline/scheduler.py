@@ -12,15 +12,18 @@ Usage :
 
 import logging
 import os
+import sys
 import time
+from pathlib import Path
 from datetime import datetime
 
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-# Imports locaux (exécuté depuis la racine du projet)
-import sys
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Permet l'execution directe via `python pipeline/scheduler.py`.
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 import pipeline.bronze_feeder   as bronze
 import pipeline.silver_transformer as silver

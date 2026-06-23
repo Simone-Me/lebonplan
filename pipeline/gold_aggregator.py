@@ -15,12 +15,19 @@ import math
 import re
 import json
 import statistics
+import sys
 import requests
+from pathlib import Path
 from pymongo import MongoClient
 from sqlalchemy import create_engine, text
 
+# Permet l'execution directe via `python pipeline/gold_aggregator.py`.
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 from pipeline.config import MONGO_URI, MONGO_DB, POSTGRES_DSN, BAN_API
-from progress_utils import tqdm
+from pipeline.progress_utils import tqdm
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("gold_aggregator")

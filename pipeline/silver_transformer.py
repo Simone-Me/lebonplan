@@ -8,19 +8,26 @@ import logging
 import struct
 import re
 import math
+import sys
 import pandas as pd
 import boto3
 import requests
 from io import BytesIO
+from pathlib import Path
 from pymongo import MongoClient, UpdateOne
 from botocore.exceptions import ClientError
+
+# Permet l'execution directe via `python pipeline/silver_transformer.py`.
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from pipeline.config import (
     MINIO_ENDPOINT, MINIO_ACCESS_KEY, MINIO_SECRET_KEY,
     BUCKET_BRONZE, BUCKET_SILVER,
     MONGO_URI, MONGO_DB,
 )
-from progress_utils import tqdm
+from pipeline.progress_utils import tqdm
 
 # ─── Config ───────────────────────────────────────────────────────────────────
 

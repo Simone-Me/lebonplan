@@ -14,6 +14,7 @@ Formats ingérés (RNCP variété) :
 import json
 import logging
 import re
+import sys
 import requests
 import pandas as pd
 import boto3
@@ -22,15 +23,19 @@ from pathlib import Path
 from datetime import date
 from tempfile import SpooledTemporaryFile
 
+# Permet l'execution directe via `python pipeline/bronze_feeder.py`.
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 from pipeline.config import (
     MINIO_ENDPOINT, MINIO_ACCESS_KEY, MINIO_SECRET_KEY,
     BUCKET_BRONZE, PARIS_API, IDF_API,
 )
-from progress_utils import tqdm
+from pipeline.progress_utils import tqdm
 
 # ─── Config ───────────────────────────────────────────────────────────────────
 
-ROOT = Path(__file__).parent.parent
 DATASRC = ROOT / "datasrc"
 PAGE_SIZE = 100
 JSON_MAX_ROWS = 50_000
@@ -201,6 +206,10 @@ DATASETS = [
         "signe": "positif",
         "source": "paris_opendata",
         "api_dataset_id": "comptage-multimodal-comptages",
+        "api_max_records": 100_000,
+        "api_order_by": "t desc",
+        "export_format": "csv",
+        "export_sep": ";",
         # "api_max_records": 2000,
         "format_source": "api_opendata",
     },
@@ -423,6 +432,11 @@ def _resolve_max_records(dataset: dict, total: int | None = None) -> int | None:
 
 def _should_use_export(dataset: dict) -> bool:
     """Utilise l'endpoint exports/json si on veut tout récupérer ou plus de 10k lignes."""
+    fetch_mode = str(dataset.get("api_fetch_mode", "")).lower()
+    if fetch_mode == "export":
+        return True
+    if fetch_mode == "records":
+        return False
     raw_limit = dataset.get("api_max_records")
     if raw_limit in (None, "", False):
         return True
@@ -434,16 +448,31 @@ def _should_use_export(dataset: dict) -> bool:
 
 def _fetch_api_export(dataset: dict, default_base_url: str, label: str) -> pd.DataFrame:
     """
-    Récupère tout un dataset OpenDataSoft via l'endpoint exports/json.
+    Récupère tout un dataset OpenDataSoft via l'endpoint exports/{format}.
     Ce mode contourne la limite `offset + limit <= 10000`.
     """
     base_url = dataset.get("api_base_url", default_base_url)
     dataset_id = dataset["api_dataset_id"]
-    export_url = f"{base_url}/{dataset_id}/exports/json"
+    export_format = str(dataset.get("export_format", "json")).lower()
+    if export_format not in {"json", "csv"}:
+        raise ValueError(f"Format d'export non supporte pour {dataset_id}: {export_format}")
+    export_url = f"{base_url}/{dataset_id}/exports/{export_format}"
     requested_limit = _resolve_max_records(dataset)
+    request_params = {}
+    if requested_limit is not None:
+        request_params["limit"] = requested_limit
+    if dataset.get("api_where"):
+        request_params["where"] = dataset["api_where"]
+    if dataset.get("api_order_by"):
+        request_params["order_by"] = dataset["api_order_by"]
 
-    log.info(f"  Fetch {label} [{dataset_id}] via export JSON (full dataset)")
-    with requests.get(export_url, stream=True, timeout=(30, 300)) as response:
+    scope = f"limit={requested_limit}" if requested_limit is not None else "full dataset"
+    if dataset.get("api_order_by"):
+        scope = f"{scope}, order_by={dataset['api_order_by']}"
+    if dataset.get("api_where"):
+        scope = f"{scope}, where={dataset['api_where']}"
+    log.info(f"  Fetch {label} [{dataset_id}] via export {export_format.upper()} ({scope})")
+    with requests.get(export_url, params=request_params, stream=True, timeout=(30, 300)) as response:
         response.raise_for_status()
         content_length = response.headers.get("content-length")
         total_bytes = int(content_length) if content_length and content_length.isdigit() else None
@@ -463,16 +492,22 @@ def _fetch_api_export(dataset: dict, default_base_url: str, label: str) -> pd.Da
                 download_progress.update(len(chunk))
             download_progress.close()
             spool.seek(0)
-            payload = json.load(spool)
+            if export_format == "json":
+                payload = json.load(spool)
+                if not isinstance(payload, list):
+                    raise ValueError(f"Format export inattendu pour {dataset_id}: liste JSON attendue")
+                if requested_limit is not None:
+                    payload = payload[:requested_limit]
+                log.info("    Normalisation JSON export en DataFrame...")
+                df = pd.json_normalize(payload)
+            else:
+                sample = spool.readline().decode("utf-8-sig", errors="replace")
+                spool.seek(0)
+                sep = dataset.get("export_sep") or (";" if sample.count(";") > sample.count(",") else ",")
+                df = pd.read_csv(spool, sep=sep, low_memory=False, encoding_errors="replace")
+                if requested_limit is not None:
+                    df = df.head(requested_limit)
 
-    if not isinstance(payload, list):
-        raise ValueError(f"Format export inattendu pour {dataset_id}: liste JSON attendue")
-
-    if requested_limit is not None:
-        payload = payload[:requested_limit]
-
-    log.info("    Normalisation JSON export en DataFrame...")
-    df = pd.json_normalize(payload)
     log.info(f"    → {len(df)} lignes récupérées via export")
     return df
 

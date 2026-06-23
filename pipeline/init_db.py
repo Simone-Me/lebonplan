@@ -4,7 +4,14 @@ Crée le schéma, les tables et les index nécessaires.
 """
 
 import logging
+import sys
+from pathlib import Path
 from sqlalchemy import create_engine, text
+
+# Permet l'execution directe via `python pipeline/init_db.py`.
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from pipeline.config import POSTGRES_DSN
 
