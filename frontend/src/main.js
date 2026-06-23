@@ -1,5 +1,5 @@
 import "maplibre-gl/dist/maplibre-gl.css";
-import { initMap, updateMapData, setMapTheme, getIndicatorScale, clearCompareHighlights } from "./map.js";
+import { initMap, updateMapData, setMapTheme, getIndicatorScale, clearCompareHighlights, togglePointLayer } from "./map.js";
 import { openSidebar } from "./sidebar.js";
 import { initCompare } from "./compare.js";
 import { initGeocode } from "./geocode.js";
@@ -93,6 +93,11 @@ function init() {
     iconSun.classList.toggle("hidden", darkMap);
     iconMoon.classList.toggle("hidden", !darkMap);
     themeBtn.title = darkMap ? "Passer en mode clair" : "Passer en mode sombre";
+  });
+
+  // Toggles de couches de points
+  document.querySelectorAll(".point-layer-toggle").forEach((cb) => {
+    cb.addEventListener("change", () => togglePointLayer(cb.dataset.type, cb.checked));
   });
 
   initAuth(() => {

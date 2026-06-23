@@ -6,8 +6,71 @@ from sqlalchemy import text
 
 from api.database import get_db
 from api.models import KPIs
+from api.mongo import get_mongo_db
 
 router = APIRouter()
+
+# Mapping type → (collection Silver, champs à renvoyer)
+_POINT_COLLECTIONS = {
+    "gares":         ("silver_gares",        ["nom", "nomlong", "mode_transport", "ligne", "arrondissement"]),
+    "velib":         ("silver_velib",         ["nom", "capacity", "arrondissement"]),
+    "espaces_verts": ("silver_espaces_verts", ["nom", "arrondissement"]),
+    "musees":        ("silver_musees",        ["nom", "arrondissement"]),
+    "cinemas":       ("silver_cinemas",       ["nom", "arrondissement"]),
+    "bibliotheques": ("silver_bibliotheques", ["nom", "arrondissement"]),
+}
+
+
+@router.get("/geo/points")
+def get_points_geojson(
+    type: str = Query(..., description="Type de point : gares|velib|espaces_verts|musees|cinemas|bibliotheques"),
+    arrondissement: int = Query(default=None, description="Filtrer par arrondissement (1-20)"),
+):
+    """GeoJSON FeatureCollection de points depuis la couche Silver MongoDB."""
+    if type not in _POINT_COLLECTIONS:
+        return JSONResponse(
+            status_code=400,
+            content={"error": f"Type inconnu. Valeurs acceptées : {', '.join(_POINT_COLLECTIONS)}"},
+        )
+
+    collection_name, fields = _POINT_COLLECTIONS[type]
+    try:
+        db = get_mongo_db()
+        coll = db[collection_name]
+        query: dict = {"location": {"$exists": True, "$ne": None}}
+        if arrondissement and 1 <= arrondissement <= 20:
+            query["arrondissement"] = arrondissement
+
+        projection = {f: 1 for f in fields}
+        projection["location"] = 1
+
+        features = []
+        for doc in coll.find(query, projection).limit(2000):
+            loc = doc.get("location")
+            if not isinstance(loc, dict) or loc.get("type") != "Point":
+                continue
+            coords = loc.get("coordinates")
+            if not coords or len(coords) < 2:
+                continue
+            label = doc.get("nom") or doc.get("nomlong") or type
+            props = {
+                "nom": label,
+                "type": type,
+                "arrondissement": doc.get("arrondissement"),
+            }
+            for f in fields:
+                if f not in props and doc.get(f) is not None:
+                    props[f] = doc[f]
+            features.append({
+                "type": "Feature",
+                "geometry": {"type": "Point", "coordinates": coords},
+                "properties": props,
+            })
+
+        return {"type": "FeatureCollection", "features": features}
+
+    except Exception as exc:
+        return JSONResponse(status_code=500, content={"error": str(exc), "trace": traceback.format_exc()})
 
 
 @router.get("/geo/arrondissements")

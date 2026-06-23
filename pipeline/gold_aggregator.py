@@ -699,9 +699,12 @@ def agg_services(db) -> dict:
 
 
 def agg_immobilier(db, annee: int) -> dict:
-    """Prix m² médian géolocalisé + logements sociaux par arrondissement."""
+    """Prix m² médian + logements sociaux + répartition par type/surface par arrondissement."""
     ls = count_by_arr(db["silver_logements_sociaux"])
-    prix_by_arr = {arr: [] for arr in ARRONDISSEMENTS}
+    prix_by_arr  = {arr: [] for arr in ARRONDISSEMENTS}
+    surfaces_by_arr = {arr: [] for arr in ARRONDISSEMENTS}
+    type_counts  = {arr: {"Appartement": 0, "Maison": 0} for arr in ARRONDISSEMENTS}
+    surf_buckets = {arr: {"t1": 0, "t2": 0, "t3": 0, "t4plus": 0} for arr in ARRONDISSEMENTS}
 
     available_years = sorted(v for v in db["silver_dvf"].distinct("annee") if isinstance(v, int))
     target_year = annee if annee in available_years else (max([y for y in available_years if y <= annee], default=None))
@@ -711,21 +714,49 @@ def agg_immobilier(db, annee: int) -> dict:
             "annee": target_year,
             "arrondissement": {"$in": ARRONDISSEMENTS},
             "nature_mutation": "Vente",
-            "type_local": "Appartement",
+            "type_local": {"$in": ["Appartement", "Maison"]},
             "prix_m2": {"$exists": True, "$ne": None},
         }
-        for doc in db["silver_dvf"].find(dvf_query):
-            arr = doc.get("arrondissement")
+        for doc in db["silver_dvf"].find(dvf_query, {"arrondissement": 1, "prix_m2": 1, "type_local": 1, "surface_reelle_bati": 1}):
+            arr  = doc.get("arrondissement")
             prix = _as_float(doc.get("prix_m2"), None)
-            if arr in prix_by_arr and prix and 500 <= prix <= 50_000:
+            tl   = doc.get("type_local", "")
+            surf = _as_float(doc.get("surface_reelle_bati"), None)
+
+            if arr not in ARRONDISSEMENTS:
+                continue
+            if tl in ("Appartement", "Maison"):
+                type_counts[arr][tl] += 1
+            if prix and 500 <= prix <= 50_000 and tl == "Appartement":
                 prix_by_arr[arr].append(prix)
+            if surf and 5 <= surf <= 500:
+                surfaces_by_arr[arr].append(surf)
+                if surf <= 25:
+                    surf_buckets[arr]["t1"] += 1
+                elif surf <= 45:
+                    surf_buckets[arr]["t2"] += 1
+                elif surf <= 65:
+                    surf_buckets[arr]["t3"] += 1
+                else:
+                    surf_buckets[arr]["t4plus"] += 1
 
     result = {}
     for arr in ARRONDISSEMENTS:
+        nb_app  = type_counts[arr]["Appartement"]
+        nb_mai  = type_counts[arr]["Maison"]
+        nb_tot  = nb_app + nb_mai
         result[arr] = {
             "nb_logements_sociaux":  safe_get(ls, arr),
             "pct_logements_sociaux": None,
             "prix_m2_median":        _median(prix_by_arr[arr]),
+            "surface_mediane":       _median(surfaces_by_arr[arr]),
+            "nb_appartements":       nb_app,
+            "nb_maisons":            nb_mai,
+            "pct_appartements":      round(nb_app / nb_tot * 100, 1) if nb_tot > 0 else None,
+            "nb_t1":                 surf_buckets[arr]["t1"],
+            "nb_t2":                 surf_buckets[arr]["t2"],
+            "nb_t3":                 surf_buckets[arr]["t3"],
+            "nb_t4plus":             surf_buckets[arr]["t4plus"],
         }
     return result
 
@@ -793,6 +824,16 @@ def agg_quartiers(db, annee: int, arrondissement_kpis: dict) -> dict:
             "nb_bibliotheques": 0,
             "nb_bureaux_poste": 0,
             "nb_ensup": 0,
+            "revenu_median_uc": None,
+            "taux_effort_achat": None,
+            "surface_mediane": None,
+            "nb_appartements": None,
+            "nb_maisons": None,
+            "pct_appartements": None,
+            "nb_t1": None,
+            "nb_t2": None,
+            "nb_t3": None,
+            "nb_t4plus": None,
             "score_global": 0.0,
         }
         for qid in quartier_ids
@@ -806,6 +847,16 @@ def agg_quartiers(db, annee: int, arrondissement_kpis: dict) -> dict:
         result[qid]["pct_logements_sociaux"] = arr_row.get("pct_logements_sociaux")
         result[qid]["score_air_no2"] = arr_row.get("score_air_no2")
         result[qid]["score_air_pm25"] = arr_row.get("score_air_pm25")
+        result[qid]["revenu_median_uc"]  = arr_row.get("revenu_median_uc")
+        result[qid]["taux_effort_achat"] = arr_row.get("taux_effort_achat")
+        result[qid]["surface_mediane"]   = arr_row.get("surface_mediane")
+        result[qid]["nb_appartements"]   = arr_row.get("nb_appartements")
+        result[qid]["nb_maisons"]        = arr_row.get("nb_maisons")
+        result[qid]["pct_appartements"]  = arr_row.get("pct_appartements")
+        result[qid]["nb_t1"]             = arr_row.get("nb_t1")
+        result[qid]["nb_t2"]             = arr_row.get("nb_t2")
+        result[qid]["nb_t3"]             = arr_row.get("nb_t3")
+        result[qid]["nb_t4plus"]         = arr_row.get("nb_t4plus")
 
     # Immobilier fin : médiane réelle du prix m² au niveau quartier si disponible
     available_years = sorted(v for v in db["silver_dvf"].distinct("annee") if isinstance(v, int))
@@ -1079,6 +1130,34 @@ def agg_quartiers(db, annee: int, arrondissement_kpis: dict) -> dict:
     return result
 
 
+# ─── Agrégation Revenus INSEE Filosofi ───────────────────────────────────────
+
+def agg_revenus(db) -> dict:
+    """
+    Lit silver_revenus (20 docs, un par arrondissement) et retourne
+    {arr: {revenu_median_uc: float}} — revenu médian annuel par UC en €.
+    Source : INSEE Filosofi 2021, mesure MED_SL (EUR/an).
+    """
+    coll = db["silver_revenus"]
+    result = {arr: {} for arr in ARRONDISSEMENTS}
+    for doc in coll.find({"arrondissement": {"$in": ARRONDISSEMENTS}, "revenu_median_uc": {"$ne": None}}):
+        arr = doc.get("arrondissement")
+        val = doc.get("revenu_median_uc")
+        if arr in result and val is not None:
+            result[arr]["revenu_median_uc"] = round(float(val), 2)
+    return result
+
+
+def agg_revenus_quartier(db, quartier_by_arr: dict) -> dict:
+    """Propage le revenu médian de l'arrondissement vers chaque quartier."""
+    rev_arr = agg_revenus(db)
+    result = {}
+    for qid, meta in quartier_by_arr.items():
+        arr = meta.get("arrondissement")
+        result[qid] = rev_arr.get(arr, {}).copy()
+    return result
+
+
 # ─── Géométries arrondissements ───────────────────────────────────────────────
 
 def load_arrondissements_geo(engine):
@@ -1201,6 +1280,9 @@ def upsert_kpis(engine, kpis_by_arr: dict, annee: int):
         INSERT INTO gold.arrondissement_kpis (
             arrondissement, annee,
             prix_m2_median, pct_logements_sociaux, nb_logements_sociaux,
+            revenu_median_uc, taux_effort_achat,
+            surface_mediane, nb_appartements, nb_maisons, pct_appartements,
+            nb_t1, nb_t2, nb_t3, nb_t4plus,
             score_qualite_vie, nb_espaces_verts, nb_arbres,
             score_air_no2, score_air_pm25, pct_fibre,
             nb_sanisettes, nb_chantiers_actifs, nb_anomalies,
@@ -1216,6 +1298,9 @@ def upsert_kpis(engine, kpis_by_arr: dict, annee: int):
         ) VALUES (
             :arrondissement, :annee,
             :prix_m2_median, :pct_logements_sociaux, :nb_logements_sociaux,
+            :revenu_median_uc, :taux_effort_achat,
+            :surface_mediane, :nb_appartements, :nb_maisons, :pct_appartements,
+            :nb_t1, :nb_t2, :nb_t3, :nb_t4plus,
             :score_qualite_vie, :nb_espaces_verts, :nb_arbres,
             :score_air_no2, :score_air_pm25, :pct_fibre,
             :nb_sanisettes, :nb_chantiers_actifs, :nb_anomalies,
@@ -1233,6 +1318,16 @@ def upsert_kpis(engine, kpis_by_arr: dict, annee: int):
             prix_m2_median        = EXCLUDED.prix_m2_median,
             pct_logements_sociaux = EXCLUDED.pct_logements_sociaux,
             nb_logements_sociaux  = EXCLUDED.nb_logements_sociaux,
+            revenu_median_uc      = EXCLUDED.revenu_median_uc,
+            taux_effort_achat     = EXCLUDED.taux_effort_achat,
+            surface_mediane       = EXCLUDED.surface_mediane,
+            nb_appartements       = EXCLUDED.nb_appartements,
+            nb_maisons            = EXCLUDED.nb_maisons,
+            pct_appartements      = EXCLUDED.pct_appartements,
+            nb_t1                 = EXCLUDED.nb_t1,
+            nb_t2                 = EXCLUDED.nb_t2,
+            nb_t3                 = EXCLUDED.nb_t3,
+            nb_t4plus             = EXCLUDED.nb_t4plus,
             score_qualite_vie     = EXCLUDED.score_qualite_vie,
             nb_espaces_verts      = EXCLUDED.nb_espaces_verts,
             nb_arbres             = EXCLUDED.nb_arbres,
@@ -1287,6 +1382,9 @@ def upsert_quartier_kpis(engine, kpis_by_quartier: dict, annee: int):
         INSERT INTO gold.quartier_kpis (
             quartier_id, quartier_code, arrondissement, nom, annee,
             prix_m2_median, pct_logements_sociaux, nb_logements_sociaux,
+            revenu_median_uc, taux_effort_achat,
+            surface_mediane, nb_appartements, nb_maisons, pct_appartements,
+            nb_t1, nb_t2, nb_t3, nb_t4plus,
             score_qualite_vie, nb_espaces_verts, nb_arbres,
             score_air_no2, score_air_pm25, pct_fibre,
             nb_sanisettes, nb_chantiers_actifs, nb_anomalies,
@@ -1302,6 +1400,9 @@ def upsert_quartier_kpis(engine, kpis_by_quartier: dict, annee: int):
         ) VALUES (
             :quartier_id, :quartier_code, :arrondissement, :nom, :annee,
             :prix_m2_median, :pct_logements_sociaux, :nb_logements_sociaux,
+            :revenu_median_uc, :taux_effort_achat,
+            :surface_mediane, :nb_appartements, :nb_maisons, :pct_appartements,
+            :nb_t1, :nb_t2, :nb_t3, :nb_t4plus,
             :score_qualite_vie, :nb_espaces_verts, :nb_arbres,
             :score_air_no2, :score_air_pm25, :pct_fibre,
             :nb_sanisettes, :nb_chantiers_actifs, :nb_anomalies,
@@ -1322,6 +1423,16 @@ def upsert_quartier_kpis(engine, kpis_by_quartier: dict, annee: int):
             prix_m2_median         = EXCLUDED.prix_m2_median,
             pct_logements_sociaux  = EXCLUDED.pct_logements_sociaux,
             nb_logements_sociaux   = EXCLUDED.nb_logements_sociaux,
+            revenu_median_uc       = EXCLUDED.revenu_median_uc,
+            taux_effort_achat      = EXCLUDED.taux_effort_achat,
+            surface_mediane        = EXCLUDED.surface_mediane,
+            nb_appartements        = EXCLUDED.nb_appartements,
+            nb_maisons             = EXCLUDED.nb_maisons,
+            pct_appartements       = EXCLUDED.pct_appartements,
+            nb_t1                  = EXCLUDED.nb_t1,
+            nb_t2                  = EXCLUDED.nb_t2,
+            nb_t3                  = EXCLUDED.nb_t3,
+            nb_t4plus              = EXCLUDED.nb_t4plus,
             score_qualite_vie      = EXCLUDED.score_qualite_vie,
             nb_espaces_verts       = EXCLUDED.nb_espaces_verts,
             nb_arbres              = EXCLUDED.nb_arbres,
@@ -1395,7 +1506,7 @@ def run(annee: int | None = None):
         if current_year not in years_to_process:
             years_to_process.append(current_year)
 
-    total_steps = 6 + len(years_to_process) * 3
+    total_steps = 7 + len(years_to_process) * 3
     step_progress = tqdm(total=total_steps, desc="Gold pipeline", unit="step")
 
     def advance(label: str):
@@ -1428,6 +1539,10 @@ def run(annee: int | None = None):
     sv = agg_services(db)
     step_progress.update(1)
 
+    advance("Revenus médians INSEE Filosofi 2021")
+    rev = agg_revenus(db)
+    step_progress.update(1)
+
     for target_year in years_to_process:
         advance(f"Immobilier — {target_year}")
         im = agg_immobilier(db, target_year)
@@ -1441,6 +1556,15 @@ def run(annee: int | None = None):
             row.update(lo.get(arr, {}))
             row.update(sv.get(arr, {}))
             row.update(im.get(arr, {}))
+            row.update(rev.get(arr, {}))
+
+            # Taux d'effort achat : nb d'années de revenu médian pour acheter 50m²
+            prix = row.get("prix_m2_median")
+            revenu = row.get("revenu_median_uc")
+            if prix and revenu and revenu > 0:
+                row["taux_effort_achat"] = round(prix * 50 / revenu, 2)
+            else:
+                row["taux_effort_achat"] = None
 
             s_qv = row.get("score_qualite_vie", 0) or 0
             s_tr = row.get("score_transports", 0)  or 0

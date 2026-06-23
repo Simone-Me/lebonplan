@@ -553,6 +553,24 @@ def transform_dvf(df: pd.DataFrame) -> pd.DataFrame:
     return df[[c for c in keep if c in df.columns]]
 
 
+def transform_revenus(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Filosofi 2021 (GEO_OBJECT=ARM, FILOSOFI_MEASURE=MED_SL) →
+    une ligne par arrondissement avec revenu_median_uc (€/an).
+    GEO 75101 → arrondissement 1, ..., 75120 → 20.
+    """
+    df = df.copy()
+    df["arrondissement"] = df["GEO"].apply(
+        lambda x: int(str(x)[-2:]) if pd.notna(x) and str(x).startswith("751") and len(str(x)) == 5 else None
+    )
+    df = df[df["arrondissement"].notna() & df["arrondissement"].between(1, 20)].copy()
+    df["arrondissement"] = df["arrondissement"].astype(int)
+    df["revenu_median_uc"] = pd.to_numeric(df["OBS_VALUE"], errors="coerce")
+    df["annee"] = pd.to_numeric(df["TIME_PERIOD"], errors="coerce").fillna(2021).astype(int)
+    df["_indicateur"] = "immobilier"
+    return df[["arrondissement", "revenu_median_uc", "annee", "_indicateur"]].dropna(subset=["revenu_median_uc"])
+
+
 # ─── Dataset registry ─────────────────────────────────────────────────────────
 # (collection_mongo, transformer, colonne_id_pour_upsert, indicateur)
 
@@ -589,6 +607,7 @@ SILVER_CONFIG = {
     "enseignement_superieur":        ("silver_ensup",              transform_idf_geo,       None,            "services_publics"),
     "bureaux_poste":                 ("silver_bureaux_poste",      transform_idf_geo,       None,            "services_publics"),
     # Immobilier
+    "revenus_medians":               ("silver_revenus",            transform_revenus,       "arrondissement", "immobilier"),
     "logements_sociaux":             ("silver_logements_sociaux",  transform_api_geo,       None,            "immobilier"),
     "dvf_prix_m2":                   ("silver_dvf",                transform_dvf,           None,            "immobilier"),
 }
@@ -623,6 +642,7 @@ SOURCE_MAP = {
     "bibliotheques":                 "paris_opendata",
     "enseignement_superieur":        "idf_opendata",
     "bureaux_poste":                 "idf_opendata",
+    "revenus_medians":               "insee_datagouv",
     "logements_sociaux":             "paris_opendata",
     "dvf_prix_m2":                   "etalab",
 }
