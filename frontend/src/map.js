@@ -404,3 +404,70 @@ export function setCompareHighlights({
 export function clearCompareHighlights() {
   setCompareHighlights();
 }
+
+// ─── Couche de points Silver ──────────────────────────────────────────────────
+
+const POINT_COLORS = {
+  gares:         "#f59e0b",
+  velib:         "#3b82f6",
+  espaces_verts: "#22c55e",
+  musees:        "#a855f7",
+  cinemas:       "#ec4899",
+  bibliotheques: "#14b8a6",
+};
+
+const _pointPopup = new maplibregl.Popup({ closeButton: false, closeOnClick: false });
+
+export async function togglePointLayer(type, enabled) {
+  if (!map) return;
+  const layerId = `points-${type}`;
+  const sourceId = `points-src-${type}`;
+
+  if (!enabled) {
+    if (map.getLayer(layerId)) map.removeLayer(layerId);
+    if (map.getSource(sourceId)) map.removeSource(sourceId);
+    return;
+  }
+
+  try {
+    const res = await fetch(`/api/geo/points?type=${type}`, {
+      headers: { Authorization: `Bearer ${localStorage.getItem("lebonplan_jwt") || ""}` },
+    });
+    if (!res.ok) return;
+    const geojson = await res.json();
+
+    if (map.getSource(sourceId)) {
+      map.getSource(sourceId).setData(geojson);
+    } else {
+      map.addSource(sourceId, { type: "geojson", data: geojson });
+    }
+
+    if (!map.getLayer(layerId)) {
+      map.addLayer({
+        id: layerId,
+        type: "circle",
+        source: sourceId,
+        paint: {
+          "circle-radius": 5,
+          "circle-color": POINT_COLORS[type] ?? "#6b7280",
+          "circle-stroke-width": 1.5,
+          "circle-stroke-color": "#ffffff",
+          "circle-opacity": 0.9,
+        },
+      });
+
+      map.on("mouseenter", layerId, (e) => {
+        map.getCanvas().style.cursor = "pointer";
+        const props = e.features[0].properties;
+        _pointPopup
+          .setLngLat(e.lngLat)
+          .setHTML(`<strong>${props.nom || type}</strong><br/><span style="color:#94a3b8;font-size:11px">${type}</span>`)
+          .addTo(map);
+      });
+      map.on("mouseleave", layerId, () => {
+        map.getCanvas().style.cursor = "";
+        _pointPopup.remove();
+      });
+    }
+  } catch (_) { /* silently ignore if API unavailable */ }
+}
