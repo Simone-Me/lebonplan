@@ -15,7 +15,7 @@ from io import BytesIO
 from pymongo import MongoClient, UpdateOne
 from botocore.exceptions import ClientError
 
-from config import (
+from pipeline.config import (
     MINIO_ENDPOINT, MINIO_ACCESS_KEY, MINIO_SECRET_KEY,
     BUCKET_BRONZE, BUCKET_SILVER,
     MONGO_URI, MONGO_DB,

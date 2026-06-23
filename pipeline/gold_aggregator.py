@@ -19,7 +19,7 @@ import requests
 from pymongo import MongoClient
 from sqlalchemy import create_engine, text
 
-from config import MONGO_URI, MONGO_DB, POSTGRES_DSN, BAN_API
+from pipeline.config import MONGO_URI, MONGO_DB, POSTGRES_DSN, BAN_API
 from progress_utils import tqdm
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")

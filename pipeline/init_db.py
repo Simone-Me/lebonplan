@@ -6,7 +6,7 @@ Crée le schéma, les tables et les index nécessaires.
 import logging
 from sqlalchemy import create_engine, text
 
-from config import POSTGRES_DSN
+from pipeline.config import POSTGRES_DSN
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("init_db")

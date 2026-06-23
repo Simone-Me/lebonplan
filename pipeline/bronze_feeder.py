@@ -22,7 +22,7 @@ from pathlib import Path
 from datetime import date
 from tempfile import SpooledTemporaryFile
 
-from config import (
+from pipeline.config import (
     MINIO_ENDPOINT, MINIO_ACCESS_KEY, MINIO_SECRET_KEY,
     BUCKET_BRONZE, PARIS_API, IDF_API,
 )
