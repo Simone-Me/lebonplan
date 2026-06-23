@@ -20,6 +20,9 @@ Explorer, comprendre et comparer les dynamiques du logement et de la qualité de
 - Comparaison enrichie : arrondissement vs arrondissement, ou quartier administratif vs quartier administratif
 - API sécurisée par JWT avec écran de connexion côté frontend
 - Route d’accueil `/` et `favicon.ico` ajoutées pour éviter le `404` direct sur la racine Uvicorn
+- Barres de progression ajoutées dans les scripts Bronze, Silver et Gold pour suivre l’avancement et estimer la fin des traitements
+- Bronze : `api_max_records` absent signifie maintenant récupération complète du dataset, sans fallback caché à `500`
+- Bronze : fallback automatique sur `exports/json` pour contourner la limite OpenDataSoft `offset + limit <= 10000`
 
 ---
 
@@ -28,6 +31,9 @@ Explorer, comprendre et comparer les dynamiques du logement et de la qualité de
 - `2026-06-23` : sécurisation de l’API FastAPI avec JWT Bearer, route `POST /api/auth/login`, vérification `GET /api/auth/me`, et protection des routes métier `/api/geo`, `/api/kpis`, `/api/timeline`, `/api/compare`
 - `2026-06-23` : ajout d’une connexion frontend avec stockage local du token, déconnexion, et rechargement de la carte uniquement après authentification
 - `2026-06-23` : correction de la racine API pour répondre sur `http://127.0.0.1:8000/` au lieu d’un `404`
+- `2026-06-23` : ajout de barres de progression `tqdm` dans `bronze_feeder.py`, `silver_transformer.py` et `gold_aggregator.py` avec suivi par dataset, chunks MongoDB et étapes d’agrégation
+- `2026-06-23` : correction du Bronze pour que `api_max_records` commenté ou absent veuille dire “tout récupérer”, au lieu de retomber automatiquement à `500`
+- `2026-06-23` : ajout d’un fallback Bronze via `exports/json` pour les datasets OpenDataSoft dépassant la limite d’API paginée `offset + limit <= 10000`
 
 ---
 

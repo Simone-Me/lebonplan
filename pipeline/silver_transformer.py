@@ -7,6 +7,7 @@ import json
 import logging
 import struct
 import re
+import math
 import pandas as pd
 import boto3
 import requests
@@ -19,6 +20,7 @@ from config import (
     BUCKET_BRONZE, BUCKET_SILVER,
     MONGO_URI, MONGO_DB,
 )
+from progress_utils import tqdm
 
 # ─── Config ───────────────────────────────────────────────────────────────────
 
@@ -689,10 +691,20 @@ def write_silver_mongo(df: pd.DataFrame, collection_name: str, id_col: str | Non
         # Bulk insert : drop la collection + insert_many par chunks
         coll.drop()
         total = 0
-        for i in range(0, len(records), BULK_CHUNK):
+        chunk_count = math.ceil(len(records) / BULK_CHUNK)
+        chunk_progress = tqdm(
+            range(0, len(records), BULK_CHUNK),
+            total=chunk_count,
+            desc=f"Mongo {collection_name}",
+            unit="chunk",
+            leave=False,
+        )
+        for i in chunk_progress:
             chunk = records[i:i + BULK_CHUNK]
             coll.insert_many(chunk, ordered=False)
             total += len(chunk)
+            chunk_progress.set_postfix_str(f"{total}/{len(records)} docs")
+        chunk_progress.close()
         log.info(f"    ✓ MongoDB {collection_name} — {total} insérés (bulk)")
 
     if "location" in df.columns:
@@ -746,7 +758,11 @@ def run(ingestion_date: str | None = None):
 
     results = []
 
-    for dataset_id, (collection, transformer, id_col, indicateur) in SILVER_CONFIG.items():
+    silver_items = list(SILVER_CONFIG.items())
+    dataset_progress = tqdm(silver_items, desc="Silver datasets", unit="dataset")
+    for idx, (dataset_id, (collection, transformer, id_col, indicateur)) in enumerate(dataset_progress, start=1):
+        dataset_progress.set_description_str(f"Silver {idx}/{len(silver_items)}")
+        dataset_progress.set_postfix_str(dataset_id)
         log.info(f"\n[{indicateur.upper()}] [{dataset_id}]")
 
         try:
@@ -777,6 +793,7 @@ def run(ingestion_date: str | None = None):
         except Exception as e:
             log.error(f"  ERREUR : {e}")
             results.append({"id": dataset_id, "status": f"ERREUR: {e}"})
+    dataset_progress.close()
 
     log.info(f"\n{'='*60}")
     log.info("RAPPORT SILVER")

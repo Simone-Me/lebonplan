@@ -25,6 +25,7 @@ from config import (
     MINIO_ENDPOINT, MINIO_ACCESS_KEY, MINIO_SECRET_KEY,
     BUCKET_BRONZE, PARIS_API, IDF_API,
 )
+from progress_utils import tqdm
 
 # ─── Config ───────────────────────────────────────────────────────────────────
 
@@ -147,7 +148,7 @@ DATASETS = [
         "signe": "negatif",
         "source": "paris_opendata",
         "api_dataset_id": "sanisettesparis",
-        "api_max_records": 600,
+        # "api_max_records": 600,
         "format_source": "api_opendata",
     },
     {
@@ -157,7 +158,7 @@ DATASETS = [
         "signe": "negatif",
         "source": "paris_opendata",
         "api_dataset_id": "chantiers-a-paris",
-        "api_max_records": 1000,
+        # "api_max_records": 1000,
         "format_source": "api_opendata",
     },
     {
@@ -167,7 +168,7 @@ DATASETS = [
         "signe": "negatif",
         "source": "paris_opendata",
         "api_dataset_id": "dans-ma-rue",
-        "api_max_records": 2000,
+        # "api_max_records": 2000,
         "format_source": "api_opendata",
     },
     {
@@ -177,7 +178,7 @@ DATASETS = [
         "signe": "negatif",
         "source": "paris_opendata",
         "api_dataset_id": "zones-touristiques-internationales",
-        "api_max_records": 100,
+        # "api_max_records": 100,
         "format_source": "api_opendata",
     },
     # ══════════════════════════════════════════════════════════════════════════
@@ -190,7 +191,7 @@ DATASETS = [
         "signe": "positif",
         "source": "paris_opendata",
         "api_dataset_id": "comptage-multimodal-comptages",
-        "api_max_records": 2000,
+        # "api_max_records": 2000,
         "format_source": "api_opendata",
     },
     {
@@ -201,7 +202,7 @@ DATASETS = [
         "source": "transport_gouv",
         "api_base_url": "https://opendata.paris.fr/api/explore/v2.1/catalog/datasets",
         "api_dataset_id": "velib-disponibilite-en-temps-reel",
-        "api_max_records": 2000,
+        # "api_max_records": 2000,
         "format_source": "api_opendata",
     },
     {
@@ -212,7 +213,7 @@ DATASETS = [
         "source": "transport_gouv",
         "api_base_url": "https://data.iledefrance-mobilites.fr/api/explore/v2.1/catalog/datasets",
         "api_dataset_id": "emplacement-des-gares-idf",
-        "api_max_records": 500,
+        # "api_max_records": 500,
         "format_source": "api_idf",
     },
     {
@@ -223,7 +224,7 @@ DATASETS = [
         "source": "transport_gouv",
         "api_base_url": "https://data.iledefrance-mobilites.fr/api/explore/v2.1/catalog/datasets",
         "api_dataset_id": "arrets",
-        "api_max_records": 5000,
+        # "api_max_records": 5000,
         "format_source": "api_idf",
     },
     # ══════════════════════════════════════════════════════════════════════════
@@ -236,7 +237,7 @@ DATASETS = [
         "signe": "positif",
         "source": "paris_opendata",
         "api_dataset_id": "que-faire-a-paris-",
-        "api_max_records": 3000,
+        # "api_max_records": 3000,
         "format_source": "api_opendata",
     },
     {
@@ -246,7 +247,7 @@ DATASETS = [
         "signe": "positif",
         "source": "paris_opendata",
         "api_dataset_id": "terrasses-autorisations",
-        "api_max_records": 2000,
+        # "api_max_records": 2000,
         "format_source": "api_opendata",
     },
     {
@@ -257,7 +258,7 @@ DATASETS = [
         "source": "idf_opendata",
         "api_base_url": IDF_API,
         "api_dataset_id": "les_salles_de_cinemas_en_ile-de-france",
-        "api_max_records": 500,
+        # "api_max_records": 500,
         "format_source": "api_idf",
     },
     {
@@ -268,7 +269,7 @@ DATASETS = [
         "source": "idf_opendata",
         "api_base_url": IDF_API,
         "api_dataset_id": "liste_des_musees_franciliens",
-        "api_max_records": 500,
+        # "api_max_records": 500,
         "format_source": "api_idf",
     },
     # ══════════════════════════════════════════════════════════════════════════
@@ -281,7 +282,7 @@ DATASETS = [
         "signe": "positif",
         "source": "paris_opendata",
         "api_dataset_id": "etablissements-scolaires-ecoles-elementaires",
-        "api_max_records": 500,
+        # "api_max_records": 500,
         "format_source": "api_opendata",
     },
     {
@@ -291,7 +292,7 @@ DATASETS = [
         "signe": "positif",
         "source": "paris_opendata",
         "api_dataset_id": "secteurs-scolaires-maternelles",
-        "api_max_records": 500,
+        # "api_max_records": 500,
         "format_source": "api_opendata",
     },
     {
@@ -301,7 +302,7 @@ DATASETS = [
         "signe": "positif",
         "source": "paris_opendata",
         "api_dataset_id": "secteurs-scolaires-colleges",
-        "api_max_records": 500,
+        # "api_max_records": 500,
         "format_source": "api_opendata",
     },
     {
@@ -311,7 +312,7 @@ DATASETS = [
         "signe": "positif",
         "source": "paris_opendata",
         "api_dataset_id": "postes-publics-des-bibliotheques",
-        "api_max_records": 100,
+        # "api_max_records": 100,
         "format_source": "api_opendata",
     },
     {
@@ -322,7 +323,7 @@ DATASETS = [
         "source": "idf_opendata",
         "api_base_url": IDF_API,
         "api_dataset_id": "principaux-etablissements-denseignement-superieur",
-        "api_max_records": 300,
+        # "api_max_records": 300,
         "format_source": "api_idf",
     },
     {
@@ -333,7 +334,7 @@ DATASETS = [
         "source": "idf_opendata",
         "api_base_url": IDF_API,
         "api_dataset_id": "les_bureaux_de_poste_et_agences_postales_en_idf",
-        "api_max_records": 500,
+        # "api_max_records": 500,
         "format_source": "api_idf",
     },
     # ══════════════════════════════════════════════════════════════════════════
@@ -346,7 +347,7 @@ DATASETS = [
         "signe": "positif",
         "source": "paris_opendata",
         "api_dataset_id": "logements-sociaux-finances-a-paris",
-        "api_max_records": 5000,
+        # "api_max_records": 5000,
         "format_source": "api_opendata",
     },
     {
@@ -386,31 +387,102 @@ def _detect_sep(path: Path) -> str:
     return ";" if first.count(";") > first.count(",") else ","
 
 
+def _resolve_max_records(dataset: dict, total: int | None = None) -> int | None:
+    """
+    Résout la limite de récupération :
+    - `api_max_records` absent / None / vide => pas de limite
+    - entier positif => limite explicite
+    """
+    raw_limit = dataset.get("api_max_records")
+    if raw_limit in (None, "", False):
+        return total
+    try:
+        limit = int(raw_limit)
+    except (TypeError, ValueError):
+        return total
+    return limit if limit > 0 else total
+
+
+def _should_use_export(dataset: dict) -> bool:
+    """Utilise l'endpoint exports/json si on veut tout récupérer ou plus de 10k lignes."""
+    raw_limit = dataset.get("api_max_records")
+    if raw_limit in (None, "", False):
+        return True
+    try:
+        return int(raw_limit) > 10_000
+    except (TypeError, ValueError):
+        return True
+
+
+def _fetch_api_export(dataset: dict, default_base_url: str, label: str) -> pd.DataFrame:
+    """
+    Récupère tout un dataset OpenDataSoft via l'endpoint exports/json.
+    Ce mode contourne la limite `offset + limit <= 10000`.
+    """
+    base_url = dataset.get("api_base_url", default_base_url)
+    dataset_id = dataset["api_dataset_id"]
+    export_url = f"{base_url}/{dataset_id}/exports/json"
+    requested_limit = _resolve_max_records(dataset)
+
+    log.info(f"  Fetch {label} [{dataset_id}] via export JSON (full dataset)")
+    response = requests.get(export_url, timeout=120)
+    response.raise_for_status()
+    payload = response.json()
+    if not isinstance(payload, list):
+        raise ValueError(f"Format export inattendu pour {dataset_id}: liste JSON attendue")
+
+    if requested_limit is not None:
+        payload = payload[:requested_limit]
+
+    df = pd.json_normalize(payload)
+    log.info(f"    → {len(df)} lignes récupérées via export")
+    return df
+
+
 def fetch_api(dataset: dict) -> pd.DataFrame:
     """Fetche depuis l'API Paris OpenDataSoft avec pagination (format api_opendata)."""
+    if _should_use_export(dataset):
+        return _fetch_api_export(dataset, PARIS_API, "API OpenDataSoft")
+
     base_url = dataset.get("api_base_url", PARIS_API)
     dataset_id = dataset["api_dataset_id"]
-    max_records = dataset.get("api_max_records", 500)
+    max_records = dataset.get("api_max_records")
     records, offset, total = [], 0, None
+    progress = None
 
-    log.info(f"  Fetch API OpenDataSoft [{dataset_id}] (max {max_records})")
-    while True:
-        r = requests.get(
-            f"{base_url}/{dataset_id}/records",
-            params={"limit": PAGE_SIZE, "offset": offset},
-            timeout=30,
-        )
-        r.raise_for_status()
-        data = r.json()
-        if total is None:
-            total = data.get("total_count", 0)
-        batch = data.get("results", [])
-        if not batch:
-            break
-        records.extend(batch)
-        offset += len(batch)
-        if offset >= min(max_records, total):
-            break
+    log.info(f"  Fetch API OpenDataSoft [{dataset_id}] (max {'ALL' if max_records in (None, '', False) else max_records})")
+    try:
+        while True:
+            r = requests.get(
+                f"{base_url}/{dataset_id}/records",
+                params={"limit": PAGE_SIZE, "offset": offset},
+                timeout=30,
+            )
+            r.raise_for_status()
+            data = r.json()
+            if total is None:
+                total = data.get("total_count", 0)
+                resolved_limit = _resolve_max_records(dataset, total)
+                progress = tqdm(
+                    total=resolved_limit or total or 0,
+                    desc=f"API {dataset_id}",
+                    unit="rows",
+                    leave=False,
+                )
+            batch = data.get("results", [])
+            if not batch:
+                break
+            records.extend(batch)
+            offset += len(batch)
+            if progress is not None:
+                remaining = max((progress.total or 0) - progress.n, 0)
+                progress.update(min(len(batch), remaining))
+            resolved_limit = _resolve_max_records(dataset, total)
+            if resolved_limit is not None and offset >= resolved_limit:
+                break
+    finally:
+        if progress is not None:
+            progress.close()
 
     df = pd.json_normalize(records)
     log.info(f"    → {len(df)} / {total} lignes récupérées")
@@ -422,34 +494,53 @@ def fetch_api_generic(dataset: dict) -> pd.DataFrame:
     Fetche depuis une API OpenDataSoft tierce (IDF, transport) avec pagination.
     Même structure que fetch_api mais base_url variable (format api_idf).
     """
+    if _should_use_export(dataset):
+        return _fetch_api_export(dataset, IDF_API, "API IDF/Transport")
+
     base_url = dataset.get("api_base_url", IDF_API)
     dataset_id = dataset["api_dataset_id"]
-    max_records = dataset.get("api_max_records", 500)
+    max_records = dataset.get("api_max_records")
     records, offset, total = [], 0, None
+    progress = None
 
-    log.info(f"  Fetch API IDF/Transport [{dataset_id}] (max {max_records})")
-    while True:
-        try:
-            r = requests.get(
-                f"{base_url}/{dataset_id}/records",
-                params={"limit": PAGE_SIZE, "offset": offset},
-                timeout=30,
-            )
-            r.raise_for_status()
-            data = r.json()
-        except Exception as e:
-            log.warning(f"    Erreur API {dataset_id} : {e}")
-            break
+    log.info(f"  Fetch API IDF/Transport [{dataset_id}] (max {'ALL' if max_records in (None, '', False) else max_records})")
+    try:
+        while True:
+            try:
+                r = requests.get(
+                    f"{base_url}/{dataset_id}/records",
+                    params={"limit": PAGE_SIZE, "offset": offset},
+                    timeout=30,
+                )
+                r.raise_for_status()
+                data = r.json()
+            except Exception as e:
+                log.warning(f"    Erreur API {dataset_id} : {e}")
+                break
 
-        if total is None:
-            total = data.get("total_count", 0)
-        batch = data.get("results", [])
-        if not batch:
-            break
-        records.extend(batch)
-        offset += len(batch)
-        if offset >= min(max_records, total or max_records):
-            break
+            if total is None:
+                total = data.get("total_count", 0)
+                resolved_limit = _resolve_max_records(dataset, total)
+                progress = tqdm(
+                    total=resolved_limit or total or 0,
+                    desc=f"API {dataset_id}",
+                    unit="rows",
+                    leave=False,
+                )
+            batch = data.get("results", [])
+            if not batch:
+                break
+            records.extend(batch)
+            offset += len(batch)
+            if progress is not None:
+                remaining = max((progress.total or 0) - progress.n, 0)
+                progress.update(min(len(batch), remaining))
+            resolved_limit = _resolve_max_records(dataset, total)
+            if resolved_limit is not None and offset >= resolved_limit:
+                break
+    finally:
+        if progress is not None:
+            progress.close()
 
     if not records:
         log.warning(f"    Aucune donnée récupérée pour {dataset_id}")
@@ -488,7 +579,9 @@ def fetch_dvf_etalab() -> pd.DataFrame:
 
     frames = []
     log.info("  Fetch DVF géolocalisé historique — Paris (département 75)")
-    for year, url in year_urls:
+    year_progress = tqdm(year_urls, desc="DVF historique", unit="annee", leave=False)
+    for year, url in year_progress:
+        year_progress.set_postfix_str(str(year))
         try:
             df_year = pd.read_csv(url, compression="gzip", low_memory=False)
             if df_year.empty:
@@ -498,6 +591,7 @@ def fetch_dvf_etalab() -> pd.DataFrame:
             log.info(f"    ✓ {year} : {len(df_year)} lignes")
         except Exception as exc:
             log.warning(f"    DVF erreur pour {year} : {exc}")
+    year_progress.close()
 
     if not frames:
         log.warning("    DVF : aucune donnée récupérée")
@@ -622,7 +716,10 @@ def run():
 
     results = []
 
-    for ds in DATASETS:
+    dataset_progress = tqdm(DATASETS, desc="Bronze datasets", unit="dataset")
+    for idx, ds in enumerate(dataset_progress, start=1):
+        dataset_progress.set_description_str(f"Bronze {idx}/{len(DATASETS)}")
+        dataset_progress.set_postfix_str(ds["id"])
         log.info(f"\n[{ds['indicateur'].upper()}][{ds['signe'].upper()}] {ds['label']}")
 
         try:
@@ -656,6 +753,7 @@ def run():
         except Exception as e:
             log.error(f"  ERREUR : {e}")
             results.append({"id": ds["id"], "indicateur": ds.get("indicateur"), "rows": 0, "status": f"ERREUR: {e}"})
+    dataset_progress.close()
 
     # ── Rapport final ──────────────────────────────────────────────────────
     log.info(f"\n{'='*60}")

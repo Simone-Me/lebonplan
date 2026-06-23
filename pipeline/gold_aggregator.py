@@ -20,6 +20,7 @@ from pymongo import MongoClient
 from sqlalchemy import create_engine, text
 
 from config import MONGO_URI, MONGO_DB, POSTGRES_DSN, BAN_API
+from progress_utils import tqdm
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("gold_aggregator")
@@ -1385,24 +1386,6 @@ def run(annee: int | None = None):
 
     db = get_mongo()
     engine = get_engine()
-
-    log.info("\n[1/8] Géométries quartiers")
-    load_quartiers_geo(engine)
-
-    log.info("\n[2/8] Géométries arrondissements")
-    load_arrondissements_geo(engine)
-
-    log.info("\n[3/8] Agrégation qualité de vie")
-    qv = agg_qualite_vie(db)
-
-    log.info("\n[4/8] Agrégation transports")
-    tr = agg_transports(db)
-
-    log.info("\n[5/8] Agrégation loisirs")
-    lo = agg_loisirs(db)
-
-    log.info("\n[6/8] Agrégation services publics")
-    sv = agg_services(db)
     current_year = date.today().year
     dvf_years = sorted(v for v in db["silver_dvf"].distinct("annee") if isinstance(v, int))
     if annee is not None:
@@ -1412,9 +1395,43 @@ def run(annee: int | None = None):
         if current_year not in years_to_process:
             years_to_process.append(current_year)
 
+    total_steps = 6 + len(years_to_process) * 3
+    step_progress = tqdm(total=total_steps, desc="Gold pipeline", unit="step")
+
+    def advance(label: str):
+        next_step = step_progress.n + 1
+        log.info(f"\n[{next_step}/{total_steps}] {label}")
+        step_progress.set_description_str(f"Gold {next_step}/{total_steps}")
+        step_progress.set_postfix_str(label)
+
+    advance("Géométries quartiers")
+    load_quartiers_geo(engine)
+    step_progress.update(1)
+
+    advance("Géométries arrondissements")
+    load_arrondissements_geo(engine)
+    step_progress.update(1)
+
+    advance("Agrégation qualité de vie")
+    qv = agg_qualite_vie(db)
+    step_progress.update(1)
+
+    advance("Agrégation transports")
+    tr = agg_transports(db)
+    step_progress.update(1)
+
+    advance("Agrégation loisirs")
+    lo = agg_loisirs(db)
+    step_progress.update(1)
+
+    advance("Agrégation services publics")
+    sv = agg_services(db)
+    step_progress.update(1)
+
     for target_year in years_to_process:
-        log.info(f"\n[7/8] Agrégation immobilier (DVF+ prix m²) — {target_year}")
+        advance(f"Immobilier — {target_year}")
         im = agg_immobilier(db, target_year)
+        step_progress.update(1)
 
         kpis_by_arr = {}
         for arr in ARRONDISSEMENTS:
@@ -1433,11 +1450,14 @@ def run(annee: int | None = None):
 
             kpis_by_arr[arr] = row
 
+        advance(f"Upsert arrondissement_kpis — {target_year}")
         upsert_kpis(engine, kpis_by_arr, target_year)
+        step_progress.update(1)
 
-        log.info(f"\n[8/8] Agrégation KPI quartiers administratifs — {target_year}")
+        advance(f"KPI quartiers administratifs — {target_year}")
         kpis_by_quartier = agg_quartiers(db, target_year, kpis_by_arr)
         upsert_quartier_kpis(engine, kpis_by_quartier, target_year)
+        step_progress.update(1)
 
         log.info("\n" + "=" * 60)
         log.info(f"RAPPORT GOLD — {target_year}")
@@ -1453,6 +1473,7 @@ def run(annee: int | None = None):
             )
         log.info("=" * 60)
 
+    step_progress.close()
     engine.dispose()
 
 
