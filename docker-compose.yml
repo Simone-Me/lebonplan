@@ -69,6 +69,31 @@ services:
         condition: service_healthy
     restart: on-failure
 
+  scheduler:
+    build:
+      context: .
+      dockerfile: Dockerfile.scheduler
+    environment:
+      PIPELINE_CRON: ${PIPELINE_CRON:-0 2 * * *}
+      RUN_ON_START: ${PIPELINE_RUN_ON_START:-false}
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-admin}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-password123}
+      MONGO_URI: mongodb://mongodb:27017
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-urban_data}
+      POSTGRES_USER: ${POSTGRES_USER:-admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-password123}
+    depends_on:
+      minio:
+        condition: service_healthy
+      mongodb:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
 volumes:
   minio_data:
   mongo_data:

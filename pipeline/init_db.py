@@ -44,6 +44,18 @@ CREATE TABLE IF NOT EXISTS gold.quartier_kpis (
     prix_m2_median          FLOAT,
     pct_logements_sociaux   FLOAT,
     nb_logements_sociaux    INT,
+    -- Accessibilité revenus (INSEE Filosofi 2021, MED_SL EUR/an)
+    revenu_median_uc        FLOAT,
+    taux_effort_achat       FLOAT,
+    -- Répartition parc immobilier (DVF)
+    surface_mediane         FLOAT,
+    nb_appartements         INT,
+    nb_maisons              INT,
+    pct_appartements        FLOAT,
+    nb_t1                   INT,
+    nb_t2                   INT,
+    nb_t3                   INT,
+    nb_t4plus               INT,
 
     -- Indicateur 1 : Qualité de vie
     score_qualite_vie       FLOAT,
@@ -107,6 +119,18 @@ CREATE TABLE IF NOT EXISTS gold.arrondissement_kpis (
     prix_m2_median          FLOAT,
     pct_logements_sociaux   FLOAT,
     nb_logements_sociaux    INT,
+    -- Accessibilité revenus (INSEE Filosofi 2021, MED_SL EUR/an)
+    revenu_median_uc        FLOAT,
+    taux_effort_achat       FLOAT,
+    -- Répartition parc immobilier (DVF)
+    surface_mediane         FLOAT,
+    nb_appartements         INT,
+    nb_maisons              INT,
+    pct_appartements        FLOAT,
+    nb_t1                   INT,
+    nb_t2                   INT,
+    nb_t3                   INT,
+    nb_t4plus               INT,
 
     -- Indicateur 1 : Qualité de vie
     score_qualite_vie       FLOAT,
@@ -186,6 +210,26 @@ ALTER TABLE gold.arrondissement_kpis ADD COLUMN IF NOT EXISTS flux_motorise FLOA
 ALTER TABLE gold.arrondissement_kpis ADD COLUMN IF NOT EXISTS pct_flux_velo_trott FLOAT;
 ALTER TABLE gold.arrondissement_kpis ADD COLUMN IF NOT EXISTS pct_flux_motorise FLOAT;
 ALTER TABLE gold.arrondissement_kpis ADD COLUMN IF NOT EXISTS pct_flux_voie_cyclable FLOAT;
+ALTER TABLE gold.arrondissement_kpis ADD COLUMN IF NOT EXISTS revenu_median_uc FLOAT;
+ALTER TABLE gold.arrondissement_kpis ADD COLUMN IF NOT EXISTS taux_effort_achat FLOAT;
+ALTER TABLE gold.arrondissement_kpis ADD COLUMN IF NOT EXISTS surface_mediane FLOAT;
+ALTER TABLE gold.arrondissement_kpis ADD COLUMN IF NOT EXISTS nb_appartements INT;
+ALTER TABLE gold.arrondissement_kpis ADD COLUMN IF NOT EXISTS nb_maisons INT;
+ALTER TABLE gold.arrondissement_kpis ADD COLUMN IF NOT EXISTS pct_appartements FLOAT;
+ALTER TABLE gold.arrondissement_kpis ADD COLUMN IF NOT EXISTS nb_t1 INT;
+ALTER TABLE gold.arrondissement_kpis ADD COLUMN IF NOT EXISTS nb_t2 INT;
+ALTER TABLE gold.arrondissement_kpis ADD COLUMN IF NOT EXISTS nb_t3 INT;
+ALTER TABLE gold.arrondissement_kpis ADD COLUMN IF NOT EXISTS nb_t4plus INT;
+ALTER TABLE gold.quartier_kpis ADD COLUMN IF NOT EXISTS revenu_median_uc FLOAT;
+ALTER TABLE gold.quartier_kpis ADD COLUMN IF NOT EXISTS taux_effort_achat FLOAT;
+ALTER TABLE gold.quartier_kpis ADD COLUMN IF NOT EXISTS surface_mediane FLOAT;
+ALTER TABLE gold.quartier_kpis ADD COLUMN IF NOT EXISTS nb_appartements INT;
+ALTER TABLE gold.quartier_kpis ADD COLUMN IF NOT EXISTS nb_maisons INT;
+ALTER TABLE gold.quartier_kpis ADD COLUMN IF NOT EXISTS pct_appartements FLOAT;
+ALTER TABLE gold.quartier_kpis ADD COLUMN IF NOT EXISTS nb_t1 INT;
+ALTER TABLE gold.quartier_kpis ADD COLUMN IF NOT EXISTS nb_t2 INT;
+ALTER TABLE gold.quartier_kpis ADD COLUMN IF NOT EXISTS nb_t3 INT;
+ALTER TABLE gold.quartier_kpis ADD COLUMN IF NOT EXISTS nb_t4plus INT;
 """
 
 

@@ -6,60 +6,77 @@ Explorer, comprendre et comparer les dynamiques du logement et de la qualité de
 
 ## Documentation complémentaire
 
-- Guide de démarrage de l'application : ce README
-- Logique cartographique et niveau de détail : `docs/carte-detaillee-paris.md`
+- Guide de démarrage : ce README
+- Logique cartographique détaillée : `docs/carte-detaillee-paris.md`
+- Catalogue des sources de données : `docs/data_catalog.md`
+- Benchmarks de performance pipeline : `docs/performance.md`
+- Décisions d'architecture (ADR) : `docs/architecture_decisions.md`
+- Analyse des écarts vs cahier des charges : `TODO_GAPS.md`
 
 ---
 
 ## Dernières évolutions
 
+- **Revenus médians INSEE Filosofi 2021** : ingestion Bronze (CSV chunked), transformation Silver, agrégation Gold (`revenu_median_uc`) et calcul `taux_effort_achat` = prix_m2 × 50 / revenu médian
+- **Répartition parc immobilier** : comptage T1/T2/T3/T4+ par tranche de surface, donut chart Chart.js dans la sidebar, `surface_mediane`, `nb_appartements`, `nb_maisons`, `pct_appartements`
+- **Couches de points sur la carte** : 6 couches togglables (gares, Vélib, espaces verts, musées, cinémas, bibliothèques) — endpoint `/api/geo/points`, circles MapLibre avec popup hover
+- **Scheduler automatique** : `pipeline/scheduler.py` (APScheduler, cron configurable), service `scheduler` dans `docker-compose.yml`, exécution quotidienne Bronze → Silver → Gold
+- **Data catalog** : `docs/data_catalog.md` — 7 sources documentées avec lignage, champs utilisés et justification
+- **Benchmarks** : `docs/performance.md` — timings par étape, EXPLAIN ANALYZE PostgreSQL, tailles des couches
+- **ADR batch vs streaming** : `docs/architecture_decisions.md` — justification du choix batch, architecture Medallion, REST JWT
 - Carte principale centrée sur les 80 quartiers administratifs
-- Choroplèthe avec échelle dynamique par indicateur, et palette inversée pour le `prix_m2_median`
-- DVF géolocalisé historique intégré pour recalculer le prix au m² par arrondissement et par quartier administratif
-- Recherche d’adresse avec suppression rapide du pin et reset
-- Comparaison enrichie : arrondissement vs arrondissement, ou quartier administratif vs quartier administratif
-- API sécurisée par JWT avec écran de connexion côté frontend
-- Route d’accueil `/` et `favicon.ico` ajoutées pour éviter le `404` direct sur la racine Uvicorn
-- Barres de progression ajoutées dans les scripts Bronze, Silver et Gold pour suivre l’avancement et estimer la fin des traitements
-- Bronze : `api_max_records` absent signifie maintenant récupération complète du dataset, sans fallback caché à `500`
-- Bronze : fallback automatique sur `exports/json` pour contourner la limite OpenDataSoft `offset + limit <= 10000`
+- Choroplèthe avec échelle dynamique par indicateur, palette inversée pour `prix_m2_median`
+- DVF géolocalisé historique intégré (prix au m² par arrondissement et par quartier)
+- Recherche d'adresse (BAN) avec suppression rapide du pin
+- Comparaison enrichie : arrondissement vs arrondissement, ou quartier vs quartier
+- API sécurisée JWT avec écran de connexion frontend
+- Barres de progression `tqdm` dans les scripts Bronze, Silver et Gold
+- Bronze : récupération complète si `api_max_records` absent, fallback `exports/json` OpenDataSoft
 
 ---
 
 ## Journal de travail
 
-- `2026-06-23` : sécurisation de l’API FastAPI avec JWT Bearer, route `POST /api/auth/login`, vérification `GET /api/auth/me`, et protection des routes métier `/api/geo`, `/api/kpis`, `/api/timeline`, `/api/compare`
-- `2026-06-23` : ajout d’une connexion frontend avec stockage local du token, déconnexion, et rechargement de la carte uniquement après authentification
-- `2026-06-23` : correction de la racine API pour répondre sur `http://127.0.0.1:8000/` au lieu d’un `404`
-- `2026-06-23` : ajout de barres de progression `tqdm` dans `bronze_feeder.py`, `silver_transformer.py` et `gold_aggregator.py` avec suivi par dataset, chunks MongoDB et étapes d’agrégation
-- `2026-06-23` : correction du Bronze pour que `api_max_records` commenté ou absent veuille dire “tout récupérer”, au lieu de retomber automatiquement à `500`
-- `2026-06-23` : ajout d’un fallback Bronze via `exports/json` pour les datasets OpenDataSoft dépassant la limite d’API paginée `offset + limit <= 10000`
+- `2026-06-23` : revenus médians INSEE Filosofi 2021 (GAP 1) — bronze → silver → gold → API → frontend
+- `2026-06-23` : répartition types de logement + donut chart (GAP 2)
+- `2026-06-23` : couches de points togglables sur la carte (GAP 3)
+- `2026-06-23` : scheduler automatique pipeline + service Docker (GAP 4)
+- `2026-06-23` : data catalog, benchmarks, ADR batch/streaming (GAPs 6/8/9)
+- `2026-06-23` : sécurisation API FastAPI avec JWT Bearer, route `POST /api/auth/login`, vérification `GET /api/auth/me`
+- `2026-06-23` : connexion frontend JWT avec stockage local du token et rechargement après authentification
+- `2026-06-23` : ajout barres de progression `tqdm` dans les 3 scripts pipeline
+- `2026-06-23` : correction Bronze — `api_max_records` absent = tout récupérer (plus de fallback à `500`)
+- `2026-06-23` : fallback Bronze via `exports/json` pour datasets OpenDataSoft > 10 000 lignes
 
 ---
 
 ## Architecture
 
 ```
-APIs / fichiers locaux (Parquet, CSV, JSON, GeoJSON)
+APIs / fichiers locaux (CSV, GeoJSON, Parquet)
               ↓  bronze_feeder.py
-  [Bronze — MinIO Parquet]       ← Object Store S3-compatible, partitionné par ingestion_date
+  [Bronze — MinIO Parquet]         ← copie brute immuable, partitionnée par ingestion_date
               ↓  silver_transformer.py
-  [Silver — MongoDB]             ← NoSQL Document Store, index géospatial 2dsphere
+  [Silver — MongoDB]               ← nettoyage, typage, géocodage WGS84, spatialisation quartier
               ↓  gold_aggregator.py
-  [Gold — PostgreSQL / PostGIS]  ← SQL relationnel, KPIs agrégés, géométries + KPI arrondissements/quartiers
-              ↓  FastAPI
-  [API REST]                     ← /api/geo, /api/kpis, /api/timeline, /api/compare
-              ↓  MapLibre GL JS
-  [Dashboard web interactif]     ← Choroplèthe quartier administratif + timeline + comparaison + géocodage BAN
+  [Gold — PostgreSQL / PostGIS]    ← KPIs agrégés par quartier × année, géométries polygones
+              ↓  FastAPI (JWT)
+  [API REST]                       ← /api/geo, /api/kpis, /api/timeline, /api/compare, /api/geo/points
+              ↓  MapLibre GL JS + Chart.js
+  [Dashboard web interactif]       ← choroplèthe + points + timeline + comparaison + géocodage BAN
 ```
 
-### Pourquoi SQL + NoSQL ?
+Le pipeline est exécuté automatiquement chaque nuit via le scheduler APScheduler (service `scheduler` Docker).  
+Pour le détail des choix batch vs streaming et l'architecture Medallion : `docs/architecture_decisions.md`.
+
+### Pourquoi cette stack ?
 
 | Technologie | Type | Rôle |
 |-------------|------|------|
-| **MinIO** | Object Store (S3) | Lac de données brutes — Parquet columnar, versioning par partition |
-| **MongoDB** | NoSQL Document Store | Silver enrichi, schéma flexible, index `2dsphere` pour requêtes géospatiales |
-| **PostgreSQL + PostGIS** | SQL Relationnel | Gold tabulaire, KPIs typés, jointures géométriques, exposé via SQLAlchemy |
+| **MinIO** | Object Store (S3) | Bronze immuable — Parquet columnar, versioning par partition |
+| **MongoDB** | Document Store NoSQL | Silver flexible, index `2dsphere` pour requêtes géospatiales |
+| **PostgreSQL + PostGIS** | SQL Relationnel | Gold tabulaire, KPIs typés, jointures géométriques |
+| **APScheduler** | Scheduler Python | Exécution cron quotidienne Bronze → Silver → Gold |
 
 ---
 
@@ -75,68 +92,10 @@ APIs / fichiers locaux (Parquet, CSV, JSON, GeoJSON)
 
 ```bash
 cp .env.example .env
-# Adapter les mots de passe si nécessaire
+# Adapter les mots de passe et le secret JWT si nécessaire
 ```
 
-### 3. Infrastructure
-
-```bash
-docker-compose up -d
-```
-
-### 4. Pipeline complet
-
-```bash
-pip install -r requirements.txt
-
-# Bronze : ingestion données brutes → MinIO
-python pipeline/bronze_feeder.py
-
-# Silver : nettoyage + géocodage → MongoDB + MinIO silver
-python pipeline/silver_transformer.py
-
-# Gold : init tables PostgreSQL
-python pipeline/init_db.py
-
-# Gold : agrégation KPIs arrondissement + quartier administratif → PostgreSQL
-python pipeline/gold_aggregator.py
-```
-
-Ordre conseillé au premier lancement :
-
-1. `docker-compose up -d`
-2. `python pipeline/init_db.py`
-3. `python pipeline/bronze_feeder.py`
-4. `python pipeline/silver_transformer.py`
-5. `python pipeline/gold_aggregator.py`
-
-Si vous travaillez avec le `docker-compose.yml` du projet, la configuration attendue côté Python est maintenant :
-
-```env
-POSTGRES_HOST=127.0.0.1
-POSTGRES_PORT=5433
-```
-
-Le port `5433` évite le conflit fréquent avec un PostgreSQL Windows déjà lancé en local sur `5432`.
-
-### 5. API
-
-```bash
-python -m uvicorn api.main:app --reload --port 8000
-```
-ou esseyer avec
-```bash
-uvicorn api.main:app --reload --port 8000
-# Docs interactives : http://localhost:8000/docs
-```
-
-Routes utiles :
-
-- Accueil API : `http://localhost:8000/`
-- Santé : `http://localhost:8000/api/health`
-- Swagger : `http://localhost:8000/docs`
-
-Variables d’authentification à définir dans `.env` :
+Variables d'environnement clés :
 
 ```env
 API_AUTH_USER=admin
@@ -144,11 +103,48 @@ API_AUTH_PASSWORD=change-me
 API_JWT_SECRET=change-me-dev-jwt-secret
 API_JWT_EXPIRE_MINUTES=120
 API_CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
+
+# Scheduler (optionnel, défaut : 2 h chaque nuit)
+PIPELINE_CRON=0 2 * * *
+PIPELINE_RUN_ON_START=false
 ```
 
-Option plus sûre :
-- laisser `API_AUTH_PASSWORD` vide
-- renseigner `API_AUTH_PASSWORD_HASH` au format `pbkdf2_sha256$iterations$salt$hash`
+### 3. Infrastructure
+
+```bash
+docker-compose up -d
+# Lance : MinIO, MongoDB, PostgreSQL, API FastAPI, Scheduler automatique
+```
+
+### 4. Pipeline manuel (premier lancement ou rejeu)
+
+```bash
+pip install -r requirements.txt
+
+# 1. Init schéma Gold
+python pipeline/init_db.py
+
+# 2. Ingestion Bronze → MinIO
+python pipeline/bronze_feeder.py
+
+# 3. Transformation Silver → MongoDB
+python pipeline/silver_transformer.py
+
+# 4. Agrégation Gold → PostgreSQL
+python pipeline/gold_aggregator.py
+```
+
+> Le scheduler Docker reprend ensuite automatiquement chaque nuit.  
+> Pour forcer une exécution immédiate via Docker : `PIPELINE_RUN_ON_START=true docker-compose up scheduler`
+
+### 5. API
+
+```bash
+uvicorn api.main:app --reload --port 8000
+# Docs interactives : http://localhost:8000/docs
+```
+
+Le port PostgreSQL est `5433` dans `docker-compose.yml` pour éviter les conflits avec un PostgreSQL local sur `5432`.
 
 ### 6. Frontend
 
@@ -168,11 +164,12 @@ npm run dev
 | Format | Exemple | Loader |
 |--------|---------|--------|
 | Parquet local | arbres, espaces verts | `pd.read_parquet()` |
-| CSV local (auto-sep) | fibre actuel, base_imb | `_detect_sep()` + `pd.read_csv()` |
+| CSV local (auto-sep) | fibre, base_imb | `_detect_sep()` + `pd.read_csv()` |
+| CSV SDMXmeta | INSEE Filosofi 2021 | `pd.read_csv()` chunked + filtre ARM |
 | JSON local | qualité de l'air | `json.load()` + `pd.json_normalize()` |
-| API REST paginée (OpenDataSoft Paris) | sanisettes, chantiers, événements | `fetch_api()` |
+| API REST paginée (OpenDataSoft) | sanisettes, chantiers | `fetch_api()` |
 | API REST paginée (IDF / transport) | cinémas, musées, gares | `fetch_api_generic()` |
-| GeoJSON (FeatureCollection) | arrondissements Paris | `requests.get()` + parsing |
+| GeoJSON (FeatureCollection) | arrondissements | `requests.get()` + parsing |
 
 ### Datasets par indicateur
 
@@ -182,24 +179,20 @@ npm run dev
 | Îlots de fraîcheur — espaces verts | parisdata | Parquet local |
 | Îlots de fraîcheur — équipements | parisdata | Parquet local |
 | Arbres de Paris | parisdata | Parquet local |
-| Qualité de l'air NO2/PM2.5/PM10/O3 | datagouv | JSON local |
+| Qualité de l'air NO2/PM2.5 (Airparif) | datagouv | JSON local |
 | Fibre — déploiement actuel (75) | datagouv | CSV local |
-| Fibre — base immeubles (75) | datagouv | CSV local |
-| Fibre — base coaxiale (75) | datagouv | CSV local |
-| Fibre — débit filaire | datagouv | CSV local |
-| Fibre — opérateurs | datagouv | CSV local |
+| Fibre — base immeubles / coaxiale / débit | datagouv | CSV local |
 | Sanisettes publiques | parisdata | API |
 | Chantiers à Paris | parisdata | API |
 | Anomalies (Dans ma rue) | parisdata | API |
-| Zones touristiques | parisdata | API |
 
 #### Indicateur 2 — Transports
 | Dataset | Source | Format |
 |---------|--------|--------|
-| Comptages multimodaux permanents des voies | parisdata | API |
+| Comptages multimodaux permanents | parisdata | API |
 | Vélib — stations disponibilité | parisdata | API |
-| Gares de voyageurs IDF | data.iledefrance-mobilites.fr | API |
-| Arrêts de bus IDF | data.iledefrance-mobilites.fr | API |
+| Gares de voyageurs IDF | idfm | API |
+| Arrêts de bus IDF | idfm | API |
 
 #### Indicateur 3 — Loisirs
 | Dataset | Source | Format |
@@ -223,44 +216,40 @@ npm run dev
 | Dataset | Source | Format |
 |---------|--------|--------|
 | Logements sociaux financés Paris | parisdata | API |
-| DVF géolocalisées Paris (historique 2021–2025) | data.gouv.fr | CSV.gz annuel |
+| DVF géolocalisées Paris (2014–2025) | data.gouv.fr / Etalab | CSV.gz annuel |
+| **Revenus médians INSEE Filosofi 2021** | data.gouv.fr / INSEE | CSV SDMXmeta |
 
 ---
 
-## 4 Indicateurs composites
+## KPIs calculés
 
-### Qualité de vie (score 0–100)
-Agrège : espaces verts, arbres, couverture fibre, sanisettes, qualité de l'air.
-Soustrait : chantiers actifs et anomalies signalées.
+### Nouveaux indicateurs immobiliers (v1.1+)
 
-### Transports (score 0–100)
-La logique actuelle suit une formule unique :
+| KPI | Formule | Couche |
+|-----|---------|--------|
+| `revenu_median_uc` | `OBS_VALUE` Filosofi `MED_SL` (EUR/an) | Silver → Gold |
+| `taux_effort_achat` | `prix_m2_median × 50 / revenu_median_uc` (années de revenu) | Gold |
+| `surface_mediane` | médiane `surface_reelle_bati` DVF (m²) | Gold |
+| `nb_appartements` / `nb_maisons` | comptage par `type_local` DVF | Gold |
+| `pct_appartements` | `nb_appartements / (nb_appartements + nb_maisons) × 100` | Gold |
+| `nb_t1` | transactions DVF avec surface ≤ 25 m² | Gold |
+| `nb_t2` | 26–45 m² | Gold |
+| `nb_t3` | 46–65 m² | Gold |
+| `nb_t4plus` | ≥ 66 m² | Gold |
 
-`score_transports = 0.6 × offre + 0.4 × intensite`
+### 4 scores composites (0–100)
 
-Bloc offre :
-- stations Vélib
-- capacité Vélib
-- gares
-- lignes distinctes
-- modes lourds présents
-- arrêts de bus
-- part d’arrêts accessibles
+**Qualité de vie** : espaces verts, arbres, fibre, sanisettes, qualité air — pénalité chantiers/anomalies
 
-Bloc intensité :
-- flux multimodal total
-- flux vélo / trottinette
-- flux bus
-- part de flux en voie cyclable
-- part motorisée inversée
+**Transports** : `0.6 × offre + 0.4 × intensité`
+- Offre : gares, Vélib, lignes, modes lourds, arrêts bus, accessibilité
+- Intensité : flux multimodal, vélo/trottinette, bus, voies cyclables
 
-### Loisirs (score 0–100)
-Densité d'événements culturels, cinémas, terrasses, musées.
+**Loisirs** : densité événements, cinémas, terrasses, musées
 
-### Services publics (score 0–100)
-Écoles, collèges, bibliothèques, bureaux de poste, enseignement supérieur.
+**Services publics** : écoles, collèges, bibliothèques, bureaux de poste, enseignement supérieur
 
-**Score global** = moyenne des 4 indicateurs.
+**Score global** = moyenne des 4 scores.
 
 ---
 
@@ -268,26 +257,23 @@ Densité d'événements culturels, cinémas, terrasses, musées.
 
 | Méthode | Route | Description |
 |---------|-------|-------------|
-| GET | `/` | Accueil API + liens utiles |
-| POST | `/api/auth/login` | Authentification et émission du JWT |
-| GET | `/api/auth/me` | Vérification du token courant |
+| GET | `/` | Accueil API |
+| POST | `/api/auth/login` | Authentification → JWT |
+| GET | `/api/auth/me` | Vérification token |
 | GET | `/api/geo/arrondissements` | GeoJSON 20 arrondissements + KPIs |
-| GET | `/api/geo/quartiers` | GeoJSON 80 quartiers administratifs + KPIs |
-| GET | `/api/kpis/{1-20}` | KPIs d'un arrondissement |
-| GET | `/api/kpis/quartier/{quartier_id}` | KPIs d'un quartier administratif |
+| GET | `/api/geo/quartiers` | GeoJSON 80 quartiers + KPIs |
+| **GET** | **`/api/geo/points?type=`** | **GeoJSON points Silver (gares\|velib\|espaces_verts\|musees\|cinemas\|bibliotheques)** |
+| GET | `/api/kpis/{1-20}` | KPIs arrondissement |
+| GET | `/api/kpis/quartier/{id}` | KPIs quartier |
 | GET | `/api/timeline/{1-20}` | Évolution temporelle arrondissement |
-| GET | `/api/timeline/quartier/{quartier_id}` | Évolution temporelle quartier |
+| GET | `/api/timeline/quartier/{id}` | Évolution temporelle quartier |
 | GET | `/api/compare?arr1=X&arr2=Y` | Comparaison côte à côte |
-| GET | `/api/health` | Santé de l'API |
+| GET | `/api/health` | Santé API |
+
+Toutes les routes métier exigent `Authorization: Bearer <jwt>`.  
+Routes publiques : `/`, `/api/auth/login`, `/api/health`, `/favicon.ico`.
 
 Docs Swagger : `http://localhost:8000/docs`
-
-Sécurité actuelle :
-
-- `/api/auth/login`, `/api/health`, `/` et `/favicon.ico` restent publics
-- les routes métier exigent désormais `Authorization: Bearer <jwt>`
-- le frontend stocke le token puis le renvoie automatiquement sur les appels API
-- le CORS n’accepte plus `*` par défaut : il est limité aux origines listées dans `API_CORS_ORIGINS`
 
 ---
 
@@ -295,15 +281,17 @@ Sécurité actuelle :
 
 | Couche | Technologie | Justification |
 |--------|-------------|---------------|
-| Ingestion | Python + pandas + boto3 | Traitement multi-formats, upload S3 |
-| Bronze | MinIO (S3) + Parquet | Stockage objet immuable, partitionné par date |
-| Silver | MongoDB 7 + PyMongo | Schéma flexible, index géospatial 2dsphere |
+| Ingestion | Python + pandas + boto3 | Multi-formats, upload S3 |
+| Bronze | MinIO (S3) + Parquet | Stockage immuable, columnar, partitionné |
+| Silver | MongoDB 7 + PyMongo | Schéma flexible, index `2dsphere` |
 | Gold | PostgreSQL 16 + PostGIS | KPIs tabulaires, jointures géospatiales |
-| API | FastAPI + SQLAlchemy | Performance, docs auto, typage Pydantic |
-| Carte | MapLibre GL JS | Open-source, pas de token, choroplèthe native |
-| Graphiques | Chart.js | Radar, ligne, léger |
+| Scheduler | APScheduler | Cron Python natif, aucune dépendance externe |
+| API | FastAPI + SQLAlchemy + PyMongo | Performance, docs auto, dual DB |
+| Auth | JWT (python-jose) | Stateless, compatible multi-instance |
+| Carte | MapLibre GL JS | Open-source, choroplèthe + cercles natifs |
+| Graphiques | Chart.js | Donut, radar, ligne — léger |
 | Géocodage | API BAN (data.gouv.fr) | Gratuit, officiel France |
-| Build frontend | Vite | Rapide, proxying API intégré |
+| Build frontend | Vite | Rapide, proxy API intégré |
 
 ---
 
@@ -312,24 +300,37 @@ Sécurité actuelle :
 ```
 .
 ├── pipeline/
-│   ├── config.py             # Config centralisée (.env)
-│   ├── bronze_feeder.py      # Ingestion → MinIO bronze
-│   ├── silver_transformer.py # Nettoyage → MongoDB + MinIO silver
-│   ├── gold_aggregator.py    # Agrégation KPIs arrondissement + quartier → PostgreSQL
-│   └── init_db.py            # DDL PostgreSQL (CREATE TABLE)
+│   ├── bronze_feeder.py       # Ingestion → MinIO bronze (25+ sources)
+│   ├── silver_transformer.py  # Nettoyage → MongoDB silver
+│   ├── gold_aggregator.py     # Agrégation KPIs → PostgreSQL
+│   ├── init_db.py             # DDL PostgreSQL (CREATE TABLE + migrations)
+│   └── scheduler.py           # Scheduler APScheduler (cron Bronze→Silver→Gold)
 ├── api/
-│   ├── main.py               # FastAPI app
-│   ├── database.py           # SQLAlchemy engine
-│   ├── models.py             # Schemas Pydantic
-│   ├── security.py           # JWT, vérification Bearer, auth env
-│   └── routers/              # auth, geo, kpis, timeline, compare
+│   ├── main.py                # FastAPI app
+│   ├── database.py            # SQLAlchemy engine (PostgreSQL)
+│   ├── mongo.py               # Client MongoDB (Silver read)
+│   ├── models.py              # Schémas Pydantic (KPIs, GeoFeature, Timeline…)
+│   ├── security.py            # JWT, Bearer, auth .env
+│   └── routers/               # auth, geo (+ /points), kpis, timeline, compare
 ├── frontend/
-│   ├── index.html
-│   └── src/                  # main.js, map.js, sidebar.js, compare.js, geocode.js
-├── datasrc/                  # Fichiers sources locaux (gitignored)
-├── docker-compose.yml
+│   ├── index.html             # Contrôles carte (indicateur, année, points, comparaison)
+│   └── src/
+│       ├── main.js            # Orchestration, toggles couches de points
+│       ├── map.js             # MapLibre : choroplèthe, highlight, togglePointLayer()
+│       ├── sidebar.js         # KPIs, donut surfaces, timeline chart
+│       ├── compare.js         # Radar comparaison
+│       ├── geocode.js         # Recherche BAN
+│       └── style.css
+├── docs/
+│   ├── carte-detaillee-paris.md
+│   ├── data_catalog.md        # Catalogue sources (lignage, licence, justification)
+│   ├── performance.md         # Benchmarks pipeline + EXPLAIN ANALYZE
+│   └── architecture_decisions.md  # ADR batch/streaming, Medallion, REST JWT
 ├── Dockerfile.api
+├── Dockerfile.scheduler
+├── docker-compose.yml
 ├── requirements.txt
+├── TODO_GAPS.md               # Analyse des écarts vs cahier des charges
 └── .env.example
 ```
 
@@ -337,38 +338,21 @@ Sécurité actuelle :
 
 ## Logique cartographique
 
-Niveau affiché par défaut :
-- `quartier_paris` de l’Open Data Paris
-- 80 quartiers administratifs
+**Niveau affiché** : 80 quartiers administratifs (source : Paris Open Data)  
+**Fond de carte** : tuiles vectorielles CartoDB Positron / Dark Matter  
+**Choroplèthe** : échelle dynamique calculée sur les valeurs réelles de chaque indicateur
 
-Source de fond de carte :
-- tuiles vectorielles MapLibre via le style `Carto Positron`
+**Couches de points Silver** (togglables via les checkboxes) :
+- Gares IDFM (jaune)
+- Stations Vélib (bleu)
+- Espaces verts (vert)
+- Musées (violet)
+- Cinémas (rose)
+- Bibliothèques (teal)
 
-Source géographique métier :
-- `gold.quartiers_geo` pour les polygones
-- `gold.quartier_kpis` pour les valeurs agrégées
+**Comparaison** : arrondissement vs arrondissement, ou quartier vs quartier (radar + tableau).
 
-Logique de calcul :
-1. Le `silver_transformer` homogénéise les coordonnées en WGS84 et garde `location`.
-2. Le `gold_aggregator` affecte les points Silver à un quartier administratif via point-in-polygon.
-3. Les agrégations métier sont recalculées à l’échelle quartier.
-4. Les données ponctuelles géolocalisées, y compris les mutations DVF, peuvent être réagrégées à l’échelle quartier.
-5. L’API expose directement un GeoJSON quartier enrichi en KPI pour la choroplèthe.
-
-Comportement d’affichage actuel :
-
-- Scores composites : couleurs calculées sur l’étendue réelle des valeurs affichées
-- `prix_m2_median` : plus cher = rouge, moins cher = vert
-- `nb_logements_sociaux` : affichage direct sur la carte quand le pourcentage n’est pas disponible
-
-Comparaison :
-
-- arrondissement vs arrondissement
-- quartier administratif vs quartier administratif
-- pas de comparaison mixte arrondissement/quartier
-
-Pour le détail complet de cette logique et la façon de la modifier :
-- `docs/carte-detaillee-paris.md`
+Pour la logique détaillée : `docs/carte-detaillee-paris.md`
 
 ---
 
@@ -377,10 +361,15 @@ Pour le détail complet de cette logique et la façon de la modifier :
 | Tag | Contenu |
 |-----|---------|
 | `v0.1.0` | Bronze + Silver initiaux (15 datasets) |
-| `v0.2.0` | Bronze + Silver étendus (27 datasets, 4 indicateurs) + config .env |
+| `v0.2.0` | Bronze + Silver étendus (27 datasets, 4 indicateurs) |
 | `v0.3.0` | Gold layer (PostgreSQL/PostGIS) |
 | `v0.4.0` | API FastAPI + Docker |
 | `v1.0.0` | Frontend complet (MapLibre + timeline + comparaison + géocodage BAN) |
+| `v1.1.0` | Revenus médians INSEE Filosofi + taux_effort_achat |
+| `v1.2.0` | Répartition types de logement + donut chart |
+| `v1.3.0` | Couches de points togglables sur la carte |
+| `v1.4.0` | Scheduler automatique pipeline (APScheduler + Docker) |
+| `v1.5.0` | Data catalog + benchmarks + ADR architecture |
 
 ---
 
@@ -388,14 +377,15 @@ Pour le détail complet de cette logique et la façon de la modifier :
 
 | Compétence | Implémentation |
 |-----------|----------------|
-| Collecter données multi-sources, multi-formats | 27 datasets : Parquet, CSV, JSON, API REST (OpenDataSoft Paris, IDF, transport), GeoJSON |
-| Stocker en format optimisé | Parquet columnar (Bronze MinIO) + Parquet Silver |
-| Nettoyer, normaliser, géocoder | WKB→GeoJSON, Lambert93→WGS84, arrondissement normalisé 1-20, géocodage BAN |
-| Architecture en zones (Medallion) | Bronze (brut) → Silver (enrichi) → Gold (agrégé) |
-| Versioning & traçabilité | Partition `ingestion_date=`, `_ingested_at`, `_meta.json`, `_format_source`, tags git |
-| Bases NoSQL | MongoDB Silver (document store, index 2dsphere) |
-| Bases SQL | PostgreSQL + PostGIS Gold (schéma relationnel, ST_GeomFromGeoJSON) |
-| API performante et filtrable | FastAPI + SQLAlchemy, filtres ?annee=, ?indicateur= |
-| Dashboard cartographique interactif | MapLibre choroplèthe + slider timeline + mode comparaison + géocodage |
-| Accessibilité dataviz | Labels ARIA, tooltips, contraste couleurs, responsive |
-| 4 indicateurs composites originaux | Qualité de vie / Transports / Loisirs / Services publics |
+| C1.1 — Collecter données multi-sources, multi-formats | 28 datasets : Parquet, CSV, CSV SDMXmeta (Filosofi), JSON, API REST, GeoJSON |
+| C1.2 — Stocker en format optimisé | Parquet columnar (Bronze MinIO) + documents MongoDB (Silver) |
+| C1.3 — Nettoyer, normaliser, géocoder | WKB→GeoJSON, Lambert93→WGS84, filtrage ARM codes INSEE, géocodage BAN |
+| C1.4 — Architecture en zones (Medallion) | Bronze (brut) → Silver (enrichi) → Gold (agrégé) |
+| C2.1 — Versioning & traçabilité | Partition `ingestion_date=`, `_ingested_at`, `_meta.json`, tags git |
+| C2.2 — Bases NoSQL | MongoDB Silver (document store, index `2dsphere`) |
+| C2.3 — Bases SQL | PostgreSQL + PostGIS Gold (ST_Within, ST_AsGeoJSON) |
+| C2.4 — Automatisation pipeline | Scheduler APScheduler cron + service Docker `scheduler` |
+| C2.5 — API performante et filtrable | FastAPI + SQLAlchemy, `?annee=`, `?indicateur=`, `?type=`, JWT |
+| C2.6 — Dashboard cartographique interactif | MapLibre choroplèthe + points Silver + slider + comparaison + géocodage |
+| C2.7 — Dataviz accessible | ARIA labels, Chart.js donut/radar/ligne, contraste couleurs |
+| C2.8 — Indicateurs composites originaux | Qualité vie / Transports / Loisirs / Services + taux_effort_achat |

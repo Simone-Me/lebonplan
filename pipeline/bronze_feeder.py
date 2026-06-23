@@ -34,6 +34,13 @@ DATASRC = ROOT / "datasrc"
 PAGE_SIZE = 100
 JSON_MAX_ROWS = 50_000
 
+FILOSOFI_URL = (
+    "https://static.data.gouv.fr/resources/principaux-indicateurs-sur-la-pauvrete-en-2021"
+    "-niveau-de-vie-taux-de-pauvrete-part-des-menages-imposes-et-decomposition-du-revenu"
+    "-disponible-1/20260415-150720/ds-filosofi-cc-2021-data.csv"
+)
+_PARIS_ARM_CODES = {f"75{str(i).zfill(3)}" for i in range(101, 121)}
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -341,6 +348,14 @@ DATASETS = [
     # IMMOBILIER (requis par le sujet)
     # ══════════════════════════════════════════════════════════════════════════
     {
+        "id": "revenus_medians",
+        "label": "Revenus médians par arrondissement — INSEE Filosofi 2021",
+        "indicateur": "immobilier",
+        "signe": "positif",
+        "source": "insee_datagouv",
+        "format_source": "filosofi",
+    },
+    {
         "id": "logements_sociaux",
         "label": "Logements sociaux financés — Paris",
         "indicateur": "immobilier",
@@ -551,6 +566,40 @@ def fetch_api_generic(dataset: dict) -> pd.DataFrame:
     return df
 
 
+def fetch_filosofi() -> pd.DataFrame:
+    """
+    Télécharge et filtre le CSV Filosofi 2021 (42 MB) depuis data.gouv.fr.
+    Ne conserve que les lignes ARM (arrondissements municipaux) de Paris
+    et la mesure MED_SL (revenu médian annuel par UC en EUR).
+    Source : INSEE Filosofi 2021, dataset 69dfa98bda55a687d20bae47
+    """
+    log.info("  Fetch INSEE Filosofi 2021 — revenus médians Paris (GEO_OBJECT=ARM, MED_SL)")
+    chunks = []
+    try:
+        for chunk in pd.read_csv(
+            FILOSOFI_URL,
+            chunksize=10_000,
+            dtype=str,
+            low_memory=False,
+        ):
+            filtered = chunk[
+                (chunk["GEO_OBJECT"] == "ARM")
+                & (chunk["GEO"].isin(_PARIS_ARM_CODES))
+                & (chunk["FILOSOFI_MEASURE"] == "MED_SL")
+            ]
+            if not filtered.empty:
+                chunks.append(filtered)
+    except Exception as exc:
+        log.warning(f"  Erreur Filosofi : {exc}")
+        return pd.DataFrame()
+    if not chunks:
+        log.warning("  Filosofi : aucune ligne Paris trouvée")
+        return pd.DataFrame()
+    df = pd.concat(chunks, ignore_index=True)
+    log.info(f"    → {len(df)} lignes revenus médians Paris arrondissements")
+    return df
+
+
 def fetch_dvf_etalab() -> pd.DataFrame:
     """
     Récupère l'historique DVF géolocalisé de Paris (département 75) depuis
@@ -725,6 +774,8 @@ def run():
         try:
             if ds.get("local_file"):
                 df = load_local(ds)
+            elif ds.get("format_source") == "filosofi":
+                df = fetch_filosofi()
             elif ds.get("format_source") == "api_dvf":
                 df = fetch_dvf_etalab()
             elif ds.get("format_source") == "api_idf":

@@ -12,6 +12,16 @@ class KPIs(BaseModel):
     prix_m2_median: Optional[float] = None
     pct_logements_sociaux: Optional[float] = None
     nb_logements_sociaux: Optional[int] = None
+    revenu_median_uc: Optional[float] = None
+    taux_effort_achat: Optional[float] = None
+    surface_mediane: Optional[float] = None
+    nb_appartements: Optional[int] = None
+    nb_maisons: Optional[int] = None
+    pct_appartements: Optional[float] = None
+    nb_t1: Optional[int] = None
+    nb_t2: Optional[int] = None
+    nb_t3: Optional[int] = None
+    nb_t4plus: Optional[int] = None
 
     score_qualite_vie: Optional[float] = None
     nb_espaces_verts: Optional[int] = None

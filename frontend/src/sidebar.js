@@ -114,10 +114,34 @@ export async function openSidebar(quartierSelection, annee, getIndicatorScale) {
       <!-- Tab: Détails -->
       <div class="tab-panel" id="tab-details">
         ${detailSection("Immobilier", [
-          ["Prix m² médian",       fmt(kpis.prix_m2_median, " €")],
-          ["Logements sociaux",    fmt(kpis.nb_logements_sociaux)],
+          ["Prix m² médian",         fmt(kpis.prix_m2_median, " €")],
+          ["Surface médiane",        fmt(kpis.surface_mediane, " m²")],
+          ["Logements sociaux",      fmt(kpis.nb_logements_sociaux)],
           ["Part logements sociaux", fmt(kpis.pct_logements_sociaux, " %")],
+          ["Revenu médian / UC",     kpis.revenu_median_uc != null
+            ? `${Number(kpis.revenu_median_uc).toLocaleString("fr-FR")} €/an`
+            : "—"],
+          ["Effort achat (50 m²)",   kpis.taux_effort_achat != null
+            ? `${Number(kpis.taux_effort_achat).toFixed(1)} ans de revenu`
+            : "—"],
         ])}
+        <div class="detail-section">
+          <button type="button" class="detail-toggle" data-target="repartition-logements">
+            Répartition par surface
+            <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="6 9 12 15 18 9"></polyline>
+            </svg>
+          </button>
+          <div class="detail-body" id="repartition-logements">
+            <canvas id="donut-surfaces" style="max-height:200px;margin:8px 0"></canvas>
+            <div class="kpi-row"><span>Studios / T1 (≤25 m²)</span><b>${fmt(kpis.nb_t1)}</b></div>
+            <div class="kpi-row"><span>T2 (26–45 m²)</span><b>${fmt(kpis.nb_t2)}</b></div>
+            <div class="kpi-row"><span>T3 (46–65 m²)</span><b>${fmt(kpis.nb_t3)}</b></div>
+            <div class="kpi-row"><span>T4+ (≥66 m²)</span><b>${fmt(kpis.nb_t4plus)}</b></div>
+            <div class="kpi-row"><span>Appartements</span><b>${fmt(kpis.nb_appartements)}</b></div>
+            <div class="kpi-row"><span>Maisons</span><b>${fmt(kpis.nb_maisons)}</b></div>
+          </div>
+        </div>
         ${detailSection("Qualité de vie", [
           ["Espaces verts",       fmt(kpis.nb_espaces_verts)],
           ["Arbres",              fmt(kpis.nb_arbres)],
@@ -172,6 +196,7 @@ export async function openSidebar(quartierSelection, annee, getIndicatorScale) {
     bindTabs(content);
     bindAccordions(content);
     renderTimeline(timeline);
+    renderDonutSurfaces(kpis);
 
   } catch (e) {
     content.innerHTML = `<p class="error">Erreur : ${e.message}</p>`;
@@ -243,6 +268,31 @@ function renderTimeline(timeline) {
           ticks: { color: "#475569", font: { size: 10 } },
         },
       },
+    },
+  });
+}
+
+function renderDonutSurfaces(kpis) {
+  const canvas = document.getElementById("donut-surfaces");
+  if (!canvas) return;
+  const t1 = kpis.nb_t1 || 0;
+  const t2 = kpis.nb_t2 || 0;
+  const t3 = kpis.nb_t3 || 0;
+  const t4 = kpis.nb_t4plus || 0;
+  if (t1 + t2 + t3 + t4 === 0) { canvas.style.display = "none"; return; }
+  new Chart(canvas, {
+    type: "doughnut",
+    data: {
+      labels: ["Studios/T1 ≤25m²", "T2 26–45m²", "T3 46–65m²", "T4+ ≥66m²"],
+      datasets: [{
+        data: [t1, t2, t3, t4],
+        backgroundColor: ["#3b82f6", "#22c55e", "#f59e0b", "#ef4444"],
+        borderWidth: 1,
+      }],
+    },
+    options: {
+      plugins: { legend: { position: "bottom", labels: { font: { size: 10 }, color: "#94a3b8" } } },
+      cutout: "60%",
     },
   });
 }
