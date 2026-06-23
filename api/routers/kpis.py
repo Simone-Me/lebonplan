@@ -26,6 +26,15 @@ def _fetch_quartier_kpis(db: Session, quartier_id: str, annee: int) -> dict | No
     return dict(row._mapping) if row else None
 
 
+def _fetch_iris_kpis(db: Session, iris_id: str, annee: int) -> dict | None:
+    sql = text("""
+        SELECT * FROM gold.iris_kpis
+        WHERE iris_id = :iris_id AND annee = :annee
+    """)
+    row = db.execute(sql, {"iris_id": iris_id, "annee": annee}).fetchone()
+    return dict(row._mapping) if row else None
+
+
 @router.get("/kpis/{arrondissement}", response_model=KPIs)
 def get_kpis(
     arrondissement: int,
@@ -59,5 +68,22 @@ def get_quartier_kpis(
     data = _fetch_quartier_kpis(db, quartier_id, annee)
     if not data:
         raise HTTPException(status_code=404, detail=f"Aucune donnée pour quartier_id={quartier_id} annee={annee}")
+
+    return KPIs(**data)
+
+
+@router.get("/kpis/iris/{iris_id}", response_model=KPIs)
+def get_iris_kpis(
+    iris_id: str,
+    annee: int = Query(default=None),
+    db: Session = Depends(get_db),
+):
+    if annee is None:
+        row = db.execute(text("SELECT MAX(annee) FROM gold.iris_kpis")).fetchone()
+        annee = row[0] if row and row[0] else 2024
+
+    data = _fetch_iris_kpis(db, iris_id, annee)
+    if not data:
+        raise HTTPException(status_code=404, detail=f"Aucune donnée pour iris_id={iris_id} annee={annee}")
 
     return KPIs(**data)

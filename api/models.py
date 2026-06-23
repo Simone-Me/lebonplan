@@ -6,6 +6,10 @@ class KPIs(BaseModel):
     arrondissement: Optional[int] = None
     quartier_id: Optional[str] = None
     quartier_code: Optional[str] = None
+    iris_id: Optional[str] = None
+    iris_code: Optional[str] = None
+    iris_nom: Optional[str] = None
+    iris_type: Optional[str] = None
     nom: Optional[str] = None
     annee: int
 
@@ -109,4 +113,15 @@ class QuartierTimelineResponse(BaseModel):
     quartier_code: Optional[str] = None
     arrondissement: Optional[int] = None
     nom: Optional[str] = None
+    points: List[TimelinePoint]
+
+
+class IrisTimelineResponse(BaseModel):
+    iris_id: str
+    iris_code: Optional[str] = None
+    quartier_id: Optional[str] = None
+    quartier_code: Optional[str] = None
+    arrondissement: Optional[int] = None
+    nom: Optional[str] = None
+    iris_type: Optional[str] = None
     points: List[TimelinePoint]

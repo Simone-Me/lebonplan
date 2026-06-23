@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import text
 
 from api.database import get_db
-from api.models import TimelineResponse, TimelinePoint, QuartierTimelineResponse
+from api.models import TimelineResponse, TimelinePoint, QuartierTimelineResponse, IrisTimelineResponse
 
 router = APIRouter()
 
@@ -49,3 +49,28 @@ def get_quartier_timeline(quartier_id: str, db: Session = Depends(get_db)):
 
     meta_dict = dict(meta._mapping)
     return QuartierTimelineResponse(points=points, **meta_dict)
+
+
+@router.get("/timeline/iris/{iris_id}", response_model=IrisTimelineResponse)
+def get_iris_timeline(iris_id: str, db: Session = Depends(get_db)):
+    meta_sql = text("""
+        SELECT iris_id, iris_code, quartier_id, quartier_code, arrondissement, nom, iris_type
+        FROM gold.iris_geo
+        WHERE iris_id = :iris_id
+    """)
+    meta = db.execute(meta_sql, {"iris_id": iris_id}).fetchone()
+    if not meta:
+        raise HTTPException(status_code=404, detail="IRIS introuvable")
+
+    sql = text("""
+        SELECT annee, prix_m2_median, score_qualite_vie, score_transports,
+               score_loisirs, score_services, score_global, pct_logements_sociaux
+        FROM gold.iris_kpis
+        WHERE iris_id = :iris_id
+        ORDER BY annee
+    """)
+    rows = db.execute(sql, {"iris_id": iris_id}).fetchall()
+    points = [TimelinePoint(**dict(row._mapping)) for row in rows]
+
+    meta_dict = dict(meta._mapping)
+    return IrisTimelineResponse(points=points, **meta_dict)

@@ -42,22 +42,40 @@ export async function fetchCurrentUser() {
   return r.json();
 }
 
-export async function fetchGeoJSON(annee, indicateur) {
+function areaGeoPath(level) {
+  if (level === "arrondissement") return "/geo/arrondissements";
+  if (level === "iris") return "/geo/iris";
+  return "/geo/quartiers";
+}
+
+function areaKpiPath(level, areaId) {
+  if (level === "arrondissement") return `/kpis/${encodeURIComponent(areaId)}`;
+  if (level === "iris") return `/kpis/iris/${encodeURIComponent(areaId)}`;
+  return `/kpis/quartier/${encodeURIComponent(areaId)}`;
+}
+
+function areaTimelinePath(level, areaId) {
+  if (level === "arrondissement") return `/timeline/${encodeURIComponent(areaId)}`;
+  if (level === "iris") return `/timeline/iris/${encodeURIComponent(areaId)}`;
+  return `/timeline/quartier/${encodeURIComponent(areaId)}`;
+}
+
+export async function fetchGeoJSON(annee, indicateur, level = "quartier") {
   const params = new URLSearchParams({ annee, indicateur });
-  const r = await apiFetch(`/geo/quartiers?${params}`);
+  const r = await apiFetch(`${areaGeoPath(level)}?${params}`);
   if (!r.ok) throw new Error(`GeoJSON fetch failed: ${r.status}`);
   return r.json();
 }
 
-export async function fetchKPIs(quartierId, annee) {
+export async function fetchKPIs(areaId, annee, level = "quartier") {
   const params = annee ? `?annee=${annee}` : "";
-  const r = await apiFetch(`/kpis/quartier/${encodeURIComponent(quartierId)}${params}`);
+  const r = await apiFetch(`${areaKpiPath(level, areaId)}${params}`);
   if (!r.ok) throw new Error(`KPIs fetch failed: ${r.status}`);
   return r.json();
 }
 
-export async function fetchTimeline(quartierId) {
-  const r = await apiFetch(`/timeline/quartier/${encodeURIComponent(quartierId)}`);
+export async function fetchTimeline(areaId, level = "quartier") {
+  const r = await apiFetch(areaTimelinePath(level, areaId));
   if (!r.ok) throw new Error(`Timeline fetch failed: ${r.status}`);
   return r.json();
 }
@@ -67,6 +85,12 @@ export async function fetchCompare(arr1, arr2, annee) {
   if (annee) params.set("annee", annee);
   const r = await apiFetch(`/compare?${params}`);
   if (!r.ok) throw new Error(`Compare fetch failed: ${r.status}`);
+  return r.json();
+}
+
+export async function fetchPointsGeoJSON(type) {
+  const r = await apiFetch(`/geo/points?type=${encodeURIComponent(type)}`);
+  if (!r.ok) throw new Error(`Points fetch failed: ${r.status}`);
   return r.json();
 }
 

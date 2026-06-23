@@ -82,10 +82,12 @@ def main():
         log.warning(f"PIPELINE_CRON invalide '{cron_expr}' → fallback 2 h chaque nuit")
         trigger = CronTrigger(hour=2, minute=0, timezone="Europe/Paris")
 
-    scheduler.add_job(run_pipeline, trigger=trigger, id="pipeline", misfire_grace_time=3600)
-
-    next_run = scheduler.get_jobs()[0].next_run_time
-    log.info(f"Prochaine exécution planifiée : {next_run}")
+    job = scheduler.add_job(run_pipeline, trigger=trigger, id="pipeline", misfire_grace_time=3600)
+    next_run = getattr(job, "next_run_time", None)
+    if next_run is not None:
+        log.info(f"Prochaine exécution planifiée : {next_run}")
+    else:
+        log.info("Prochaine exécution planifiée : calculée au démarrage du scheduler")
 
     try:
         scheduler.start()

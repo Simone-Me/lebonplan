@@ -636,6 +636,7 @@ def fetch_filosofi() -> pd.DataFrame:
     try:
         for chunk in pd.read_csv(
             FILOSOFI_URL,
+            sep=";",
             chunksize=10_000,
             dtype=str,
             low_memory=False,

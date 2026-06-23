@@ -38,7 +38,16 @@ logging.basicConfig(
 )
 log = logging.getLogger("silver_transformer")
 ARRONDISSEMENTS_GEO_URL = "https://opendata.paris.fr/api/explore/v2.1/catalog/datasets/arrondissements/exports/geojson?lang=fr&timezone=Europe%2FParis"
+QUARTIERS_GEO_URL = "https://opendata.paris.fr/api/explore/v2.1/catalog/datasets/quartier_paris/exports/geojson?lang=fr&timezone=Europe%2FParis"
+IRIS_GEO_URL = 'https://opendata.iledefrance.fr/api/explore/v2.1/catalog/datasets/iris/exports/geojson?where=startswith(code_iris,"751")'
 _ARRONDISSEMENT_SHAPES = None
+_QUARTIER_SHAPES = None
+_QUARTIER_BY_ID = None
+_QUARTIER_POINT_CACHE = {}
+_IRIS_SHAPES = None
+_IRIS_BY_ID = None
+_IRIS_POINT_CACHE = {}
+ADMIN_SUBAREA_FIELDS = ["quartier_id", "quartier_code", "quartier_nom", "iris_id", "iris_code", "iris_nom", "iris_type"]
 
 # ─── MinIO ────────────────────────────────────────────────────────────────────
 
@@ -169,6 +178,19 @@ def _extract_location_from_locations(value) -> dict | None:
     return None
 
 
+def _extract_location_from_coordonnees_geo(value) -> dict | None:
+    """Extrait un point GeoJSON depuis une chaine 'lat, lon'."""
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    parts = [part.strip() for part in text.split(",")]
+    if len(parts) != 2:
+        return None
+    return latlon_cols_to_geojson([parts[0]], [parts[1]])[0]
+
+
 def _extract_polygon_rings(geometry: dict) -> list[list[list[float]]]:
     """Extrait les anneaux externes d'une géométrie GeoJSON Polygon/MultiPolygon."""
     if not isinstance(geometry, dict):
@@ -180,6 +202,14 @@ def _extract_polygon_rings(geometry: dict) -> list[list[list[float]]]:
     if gtype == "MultiPolygon":
         return [poly[0] for poly in coords if poly]
     return []
+
+
+def _first_present(props: dict, keys: list[str], default=None):
+    for key in keys:
+        value = props.get(key)
+        if value not in (None, ""):
+            return value
+    return default
 
 
 def _point_in_ring(lon: float, lat: float, ring: list[list[float]]) -> bool:
@@ -233,6 +263,127 @@ def _load_arrondissement_shapes():
     return _ARRONDISSEMENT_SHAPES
 
 
+def _load_quartier_shapes():
+    """Charge et met en cache les polygones et métadonnées des quartiers administratifs."""
+    global _QUARTIER_SHAPES, _QUARTIER_BY_ID
+    if _QUARTIER_SHAPES is not None and _QUARTIER_BY_ID is not None:
+        return _QUARTIER_SHAPES, _QUARTIER_BY_ID
+
+    shapes = []
+    quartiers_by_id = {}
+    try:
+        response = requests.get(QUARTIERS_GEO_URL, timeout=30)
+        response.raise_for_status()
+        geojson = response.json()
+        for feature in geojson.get("features", []):
+            props = feature.get("properties", {})
+            quartier_id = None
+            for key in ["n_sq_qu", "id_quartier", "quartier_id", "c_qu", "code_qu"]:
+                value = props.get(key)
+                if value not in (None, ""):
+                    quartier_id = value
+                    break
+            quartier_code = None
+            for key in ["c_qu", "code_quartier", "code_qu", "quartier_code"]:
+                value = props.get(key)
+                if value not in (None, ""):
+                    quartier_code = value
+                    break
+            nom = None
+            for key in ["l_qu", "nom_quart", "nom_quartier", "quartier", "nom"]:
+                value = props.get(key)
+                if value not in (None, ""):
+                    nom = value
+                    break
+            arr = None
+            for key in ["c_ar", "arrondissement", "code_arrondissement", "c_arinsee", "arr_insee"]:
+                if key in props:
+                    arr = parse_arrondissement(props.get(key))
+                    if arr:
+                        break
+            rings = _extract_polygon_rings(feature.get("geometry", {}))
+            if not quartier_id:
+                quartier_id = quartier_code or nom
+            if not quartier_id or not nom or not rings:
+                continue
+
+            info = {
+                "quartier_id": str(quartier_id),
+                "quartier_code": str(quartier_code) if quartier_code is not None else None,
+                "quartier_nom": str(nom),
+                "arrondissement": arr,
+                "rings": rings,
+            }
+            shapes.append(info)
+            quartiers_by_id[info["quartier_id"]] = info
+    except Exception as exc:
+        log.warning(f"    Impossible de charger les polygones des quartiers administratifs: {exc}")
+        shapes = []
+        quartiers_by_id = {}
+
+    _QUARTIER_SHAPES = shapes
+    _QUARTIER_BY_ID = quartiers_by_id
+    return _QUARTIER_SHAPES, _QUARTIER_BY_ID
+
+
+def _load_iris_shapes():
+    """Charge et met en cache les polygones et métadonnées IRIS de Paris."""
+    global _IRIS_SHAPES, _IRIS_BY_ID
+    if _IRIS_SHAPES is not None and _IRIS_BY_ID is not None:
+        return _IRIS_SHAPES, _IRIS_BY_ID
+
+    shapes = []
+    iris_by_id = {}
+    try:
+        response = requests.get(IRIS_GEO_URL, timeout=60)
+        response.raise_for_status()
+        geojson = response.json()
+        for feature in geojson.get("features", []):
+            props = feature.get("properties", {})
+            iris_id = _first_present(props, ["code_iris", "CODE_IRIS", "id"])
+            nom = _first_present(props, ["nom_iris", "NOM_IRIS", "libelle"])
+            iris_type = _first_present(props, ["typ_iris", "TYP_IRIS", "type_iris"])
+            code_insee = _first_present(props, ["insee_com", "INSEE_COM"])
+            arr = parse_arrondissement(code_insee or (str(iris_id)[:5] if iris_id else None))
+            rings = _extract_polygon_rings(feature.get("geometry", {}))
+            if not iris_id or not nom or not rings:
+                continue
+
+            center = props.get("geo_point_2d") or {}
+            center_loc = None
+            if isinstance(center, dict):
+                lon = center.get("lon")
+                lat = center.get("lat")
+                if lon is not None and lat is not None:
+                    try:
+                        center_loc = {"type": "Point", "coordinates": [float(lon), float(lat)]}
+                    except Exception:
+                        center_loc = None
+            quartier = infer_quartier_from_location(center_loc) if center_loc else None
+
+            info = {
+                "iris_id": str(iris_id),
+                "iris_code": str(iris_id),
+                "iris_nom": str(nom),
+                "iris_type": str(iris_type) if iris_type not in (None, "") else None,
+                "arrondissement": arr,
+                "quartier_id": quartier["quartier_id"] if quartier else None,
+                "quartier_code": quartier["quartier_code"] if quartier else None,
+                "quartier_nom": quartier["quartier_nom"] if quartier else None,
+                "rings": rings,
+            }
+            shapes.append(info)
+            iris_by_id[info["iris_id"]] = info
+    except Exception as exc:
+        log.warning(f"    Impossible de charger les polygones IRIS de Paris: {exc}")
+        shapes = []
+        iris_by_id = {}
+
+    _IRIS_SHAPES = shapes
+    _IRIS_BY_ID = iris_by_id
+    return _IRIS_SHAPES, _IRIS_BY_ID
+
+
 def infer_arrondissement_from_location(location: dict | None) -> int | None:
     """Déduit l'arrondissement à partir d'un point GeoJSON WGS84."""
     if not isinstance(location, dict):
@@ -253,6 +404,60 @@ def infer_arrondissement_from_location(location: dict | None) -> int | None:
     return None
 
 
+def infer_quartier_from_location(location: dict | None) -> dict | None:
+    """Déduit le quartier administratif à partir d'un point GeoJSON WGS84."""
+    if not isinstance(location, dict):
+        return None
+    coords = location.get("coordinates", [])
+    if len(coords) != 2:
+        return None
+    try:
+        lon = float(coords[0])
+        lat = float(coords[1])
+    except Exception:
+        return None
+
+    cache_key = (round(lon, 6), round(lat, 6))
+    if cache_key in _QUARTIER_POINT_CACHE:
+        return _QUARTIER_POINT_CACHE[cache_key]
+
+    quartiers, _ = _load_quartier_shapes()
+    for quartier in quartiers:
+        if any(_point_in_ring(lon, lat, ring) for ring in quartier["rings"]):
+            _QUARTIER_POINT_CACHE[cache_key] = quartier
+            return quartier
+
+    _QUARTIER_POINT_CACHE[cache_key] = None
+    return None
+
+
+def infer_iris_from_location(location: dict | None) -> dict | None:
+    """Déduit l'IRIS à partir d'un point GeoJSON WGS84."""
+    if not isinstance(location, dict):
+        return None
+    coords = location.get("coordinates", [])
+    if len(coords) != 2:
+        return None
+    try:
+        lon = float(coords[0])
+        lat = float(coords[1])
+    except Exception:
+        return None
+
+    cache_key = (round(lon, 6), round(lat, 6))
+    if cache_key in _IRIS_POINT_CACHE:
+        return _IRIS_POINT_CACHE[cache_key]
+
+    iris_shapes, _ = _load_iris_shapes()
+    for iris in iris_shapes:
+        if any(_point_in_ring(lon, lat, ring) for ring in iris["rings"]):
+            _IRIS_POINT_CACHE[cache_key] = iris
+            return iris
+
+    _IRIS_POINT_CACHE[cache_key] = None
+    return None
+
+
 def _rename_first_existing(df: pd.DataFrame, target: str, candidates: list[str]) -> pd.DataFrame:
     """Renomme la première colonne trouvée parmi plusieurs alias vers un nom cible."""
     if target in df.columns:
@@ -260,6 +465,92 @@ def _rename_first_existing(df: pd.DataFrame, target: str, candidates: list[str])
     for col in candidates:
         if col in df.columns:
             return df.rename(columns={col: target})
+    return df
+
+
+def _enrich_admin_areas(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Enrichit les documents géolocalisés avec des identifiants administratifs persistants.
+    Cette étape accélère fortement les agrégations Gold et prépare des maillages plus fins.
+    """
+    if "location" not in df.columns or df.empty:
+        return df
+
+    quartier_infos = [infer_quartier_from_location(loc) for loc in df["location"]]
+    quartier_ids = pd.Series(
+        [info["quartier_id"] if info else None for info in quartier_infos],
+        index=df.index,
+        dtype="object",
+    )
+    quartier_codes = pd.Series(
+        [info["quartier_code"] if info else None for info in quartier_infos],
+        index=df.index,
+        dtype="object",
+    )
+    quartier_noms = pd.Series(
+        [info["quartier_nom"] if info else None for info in quartier_infos],
+        index=df.index,
+        dtype="object",
+    )
+    quartier_arrs = pd.Series(
+        [info["arrondissement"] if info else None for info in quartier_infos],
+        index=df.index,
+        dtype="object",
+    )
+    iris_infos = [infer_iris_from_location(loc) for loc in df["location"]]
+    iris_ids = pd.Series(
+        [info["iris_id"] if info else None for info in iris_infos],
+        index=df.index,
+        dtype="object",
+    )
+    iris_codes = pd.Series(
+        [info["iris_code"] if info else None for info in iris_infos],
+        index=df.index,
+        dtype="object",
+    )
+    iris_noms = pd.Series(
+        [info["iris_nom"] if info else None for info in iris_infos],
+        index=df.index,
+        dtype="object",
+    )
+    iris_types = pd.Series(
+        [info["iris_type"] if info else None for info in iris_infos],
+        index=df.index,
+        dtype="object",
+    )
+    iris_arrs = pd.Series(
+        [info["arrondissement"] if info else None for info in iris_infos],
+        index=df.index,
+        dtype="object",
+    )
+
+    for col_name, values in [
+        ("quartier_id", quartier_ids),
+        ("quartier_code", quartier_codes),
+        ("quartier_nom", quartier_noms),
+        ("iris_id", iris_ids),
+        ("iris_code", iris_codes),
+        ("iris_nom", iris_noms),
+        ("iris_type", iris_types),
+    ]:
+        if col_name not in df.columns:
+            df[col_name] = values
+        else:
+            missing_mask = df[col_name].isna()
+            if missing_mask.any():
+                df.loc[missing_mask, col_name] = values.loc[missing_mask]
+
+    if "arrondissement" not in df.columns:
+        df["arrondissement"] = quartier_arrs
+    else:
+        df["arrondissement"] = df["arrondissement"].astype("object")
+        missing_mask = df["arrondissement"].isna()
+        if missing_mask.any():
+            df.loc[missing_mask, "arrondissement"] = quartier_arrs.loc[missing_mask]
+        missing_mask = df["arrondissement"].isna()
+        if missing_mask.any():
+            df.loc[missing_mask, "arrondissement"] = iris_arrs.loc[missing_mask]
+
     return df
 
 
@@ -281,12 +572,21 @@ def _base_geo(df: pd.DataFrame) -> pd.DataFrame:
         ("coordonnees_geo.lat", "coordonnees_geo.lon"),
         ("geo.lat", "geo.lon"),
         ("geolocalisation.lat", "geolocalisation.lon"),
+        ("position.lat", "position.lon"),
         ("geo_point_2d.lat", "geo_point_2d.lon"),
         ("lat_lon.lat", "lat_lon.lon"),
     ]:
         df = _fill_location_from_latlon(df, lat_c, lon_c)
     if "locations" in df.columns:
         derived_locations = df["locations"].apply(_extract_location_from_locations)
+        if "location" not in df.columns:
+            df["location"] = derived_locations
+        else:
+            missing_mask = df["location"].isna()
+            if missing_mask.any():
+                df.loc[missing_mask, "location"] = derived_locations.loc[missing_mask]
+    if "coordonnees_geo" in df.columns:
+        derived_locations = df["coordonnees_geo"].apply(_extract_location_from_coordonnees_geo)
         if "location" not in df.columns:
             df["location"] = derived_locations
         else:
@@ -309,7 +609,39 @@ def _base_geo(df: pd.DataFrame) -> pd.DataFrame:
         missing_mask = df["arrondissement"].isna()
         if missing_mask.any():
             df.loc[missing_mask, "arrondissement"] = df.loc[missing_mask, "location"].apply(infer_arrondissement_from_location)
-    return df
+    return _enrich_admin_areas(df)
+
+
+def _filter_to_paris(df: pd.DataFrame, label: str) -> pd.DataFrame:
+    """Conserve uniquement Paris intra-muros si possible, sinon retourne le dataset inchangé."""
+    filtered = None
+
+    if "arrondissement" in df.columns:
+        arr = pd.to_numeric(df["arrondissement"], errors="coerce")
+        candidate = df[arr.between(1, 20)]
+        if not candidate.empty:
+            filtered = candidate
+
+    if filtered is None and "location" in df.columns:
+        def in_paris(loc):
+            if not isinstance(loc, dict):
+                return False
+            coords = loc.get("coordinates", [])
+            if len(coords) != 2:
+                return False
+            lon, lat = coords
+            return 2.22 <= lon <= 2.47 and 48.81 <= lat <= 48.91
+
+        candidate = df[df["location"].apply(in_paris)]
+        if not candidate.empty:
+            filtered = candidate
+
+    if filtered is None:
+        return df
+
+    if len(filtered) != len(df):
+        log.info(f"    {label} Paris filter: {len(df)} → {len(filtered)} lignes")
+    return filtered
 
 
 # ─── Transformers spécifiques ─────────────────────────────────────────────────
@@ -318,6 +650,7 @@ def transform_espaces_verts(df: pd.DataFrame) -> pd.DataFrame:
     df = _base_geo(df)
     keep = [
         "identifiant", "nom", "type", "arrondissement",
+        *ADMIN_SUBAREA_FIELDS,
         "statut_ouverture", "ouvert_24h", "adresse", "location",
         "_ingested_at", "_dataset_id", "_indicateur", "_signe", "_source",
     ]
@@ -328,6 +661,7 @@ def transform_equipements(df: pd.DataFrame) -> pd.DataFrame:
     df = _base_geo(df)
     keep = [
         "identifiant", "nom", "type", "payant", "arrondissement",
+        *ADMIN_SUBAREA_FIELDS,
         "statut_ouverture", "adresse", "location",
         "_ingested_at", "_dataset_id", "_indicateur", "_signe", "_source",
     ]
@@ -339,6 +673,7 @@ def transform_arbres(df: pd.DataFrame) -> pd.DataFrame:
     keep = [
         "idbase", "libellefrancais", "genre", "espece", "domanialite",
         "arrondissement", "adresse", "hauteurencm", "circonferenceencm",
+        *ADMIN_SUBAREA_FIELDS,
         "location", "_ingested_at", "_dataset_id", "_indicateur", "_signe", "_source",
     ]
     return df[[c for c in keep if c in df.columns]]
@@ -361,7 +696,7 @@ def transform_fibre_imb(df: pd.DataFrame) -> pd.DataFrame:
             ]
     if "imb_code_insee" in df.columns:
         df["arrondissement"] = df["imb_code_insee"].apply(parse_arrondissement)
-    return df
+    return _enrich_admin_areas(df)
 
 
 def transform_api_geo(df: pd.DataFrame) -> pd.DataFrame:
@@ -369,11 +704,25 @@ def transform_api_geo(df: pd.DataFrame) -> pd.DataFrame:
     return _base_geo(df)
 
 
+def transform_voies(df: pd.DataFrame) -> pd.DataFrame:
+    """Comptages multimodaux : ne conserve que les colonnes utiles et Paris intra-muros."""
+    df = _base_geo(df)
+    df = _filter_to_paris(df, "Voies")
+    keep = [
+        "id_trajectoire", "id_site", "label", "t", "mode", "nb_usagers",
+        "voie", "sens", "trajectoire", "arrondissement",
+        *ADMIN_SUBAREA_FIELDS, "location",
+        "_ingested_at", "_dataset_id", "_indicateur", "_signe", "_source",
+    ]
+    return df[[c for c in keep if c in df.columns]]
+
+
 def transform_ecoles(df: pd.DataFrame) -> pd.DataFrame:
     df = _base_geo(df)
     keep = [
         "identifiant_de_l_etablissement", "nom_etablissement", "type_etablissement",
-        "arrondissement", "adresse_1", "location",
+        "arrondissement", *ADMIN_SUBAREA_FIELDS,
+        "adresse_1", "location",
         "_ingested_at", "_dataset_id", "_indicateur", "_signe", "_source",
     ]
     # Noms alternatifs selon le dataset
@@ -468,7 +817,8 @@ def transform_idf_transport(df: pd.DataFrame) -> pd.DataFrame:
 
     keep = [
         "identifiant", "nom", "mode_transport", "ligne",
-        "commune", "code_postal", "arrondissement", "accessible",
+        "commune", "code_postal", "arrondissement",
+        *ADMIN_SUBAREA_FIELDS, "accessible",
         "terrer", "termetro", "tertram", "tertrain", "terval",
         "location",
         "_ingested_at", "_dataset_id", "_indicateur", "_signe", "_source",
@@ -501,7 +851,8 @@ def transform_velib(df: pd.DataFrame) -> pd.DataFrame:
         "stationcode", "nom", "capacity",
         "numbikesavailable", "numdocksavailable", "mechanical", "ebike",
         "is_renting", "is_returning", "paiement_cb",
-        "nom_arrondissement_communes", "code_insee_commune", "arrondissement", "location",
+        "nom_arrondissement_communes", "code_insee_commune", "arrondissement",
+        *ADMIN_SUBAREA_FIELDS, "location",
         "_ingested_at", "_dataset_id", "_indicateur", "_signe", "_source",
     ]
     return df[[c for c in keep if c in df.columns]]
@@ -526,6 +877,8 @@ def transform_dvf(df: pd.DataFrame) -> pd.DataFrame:
         elif "code_insee" in df.columns:
             df["arrondissement"] = df["code_insee"].apply(parse_arrondissement)
 
+        df = _enrich_admin_areas(df)
+
         df["annee"] = pd.to_datetime(df["date_mutation"], errors="coerce").dt.year
         df["valeur_fonciere"] = pd.to_numeric(df.get("valeur_fonciere"), errors="coerce")
         df["surface_reelle_bati"] = pd.to_numeric(df.get("surface_reelle_bati"), errors="coerce")
@@ -538,6 +891,7 @@ def transform_dvf(df: pd.DataFrame) -> pd.DataFrame:
             "nature_mutation", "valeur_fonciere", "code_postal", "code_insee",
             "nom_commune", "arrondissement", "type_local", "surface_reelle_bati",
             "nombre_pieces_principales", "surface_terrain", "nombre_lots",
+            *ADMIN_SUBAREA_FIELDS,
             "longitude", "latitude", "location", "prix_m2", "source_year",
             "_ingested_at", "_dataset_id", "_indicateur", "_signe", "_source",
         ]
@@ -597,7 +951,7 @@ SILVER_CONFIG = {
     "anomalies":                     ("silver_anomalies",          transform_api_geo,       None,            "qualite_vie"),
     "zones_touristiques":            ("silver_zones_touristiques", transform_api_geo,       None,            "qualite_vie"),
     # Transports
-    "voies":                         ("silver_voies",              transform_api_geo,       None,            "transports"),
+    "voies":                         ("silver_voies",              transform_voies,         None,            "transports"),
     "velib":                         ("silver_velib",              transform_velib,         "stationcode",   "transports"),
     "gares":                         ("silver_gares",              transform_idf_transport, None,            "transports"),
     "bus":                           ("silver_bus",                transform_idf_transport, None,            "transports"),
@@ -741,6 +1095,10 @@ def write_silver_mongo(df: pd.DataFrame, collection_name: str, id_col: str | Non
             pass
     if "arrondissement" in df.columns:
         coll.create_index("arrondissement")
+    if "quartier_id" in df.columns:
+        coll.create_index("quartier_id")
+    if "iris_id" in df.columns:
+        coll.create_index("iris_id")
     coll.create_index("_indicateur")
 
 

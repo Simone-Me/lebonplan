@@ -55,30 +55,43 @@ function detailSection(title, rows) {
     </div>`;
 }
 
-export async function openSidebar(quartierSelection, annee, getIndicatorScale) {
-  const quartierId = typeof quartierSelection === "object"
-    ? quartierSelection.quartier_id
-    : quartierSelection;
-  const quartierMeta = typeof quartierSelection === "object"
-    ? quartierSelection
-    : { quartier_id: quartierSelection };
+export async function openSidebar(areaSelection, annee, getIndicatorScale, level = "quartier") {
+  const areaId = typeof areaSelection === "object"
+    ? areaSelection.area_id
+      ?? areaSelection.iris_id
+      ?? areaSelection.quartier_id
+      ?? areaSelection.arrondissement
+    : areaSelection;
+  const areaMeta = typeof areaSelection === "object"
+    ? areaSelection
+    : { area_id: areaSelection, level };
 
   const content = document.getElementById("sidebar-content");
   content.innerHTML = `<p class="loading">Chargement…</p>`;
 
   try {
     const [kpis, timeline] = await Promise.all([
-      fetchKPIs(quartierId, annee),
-      fetchTimeline(quartierId),
+      fetchKPIs(areaId, annee, level),
+      fetchTimeline(areaId, level),
     ]);
 
-    const nom = kpis.nom || timeline.nom || quartierMeta.nom || "Quartier administratif";
-    const arr = kpis.arrondissement || timeline.arrondissement || quartierMeta.arrondissement;
-    const code = kpis.quartier_code || timeline.quartier_code || quartierMeta.quartier_code;
+    const nom = kpis.nom || kpis.iris_nom || timeline.nom || areaMeta.nom || "Zone";
+    const arr = kpis.arrondissement || timeline.arrondissement || areaMeta.arrondissement;
+    const quartierCode = kpis.quartier_code || timeline.quartier_code || areaMeta.quartier_code;
+    const irisCode = kpis.iris_code || timeline.iris_code || areaMeta.iris_code;
+    const irisType = kpis.iris_type || timeline.iris_type || areaMeta.iris_type;
+    const levelLabel = level === "arrondissement"
+      ? "Arrondissement"
+      : level === "iris"
+        ? "IRIS"
+        : "Quartier administratif";
     const metaLigne = [
+      levelLabel,
       `Données ${annee}`,
       arr ? `${arr}e arrondissement` : null,
-      code ? `#${code}` : null,
+      quartierCode ? `Q#${quartierCode}` : null,
+      irisCode ? `IRIS ${irisCode}` : null,
+      irisType ? `Type ${irisType}` : null,
     ].filter(Boolean).join(" · ");
     const scales = {
       score_global: getIndicatorScale?.("score_global"),
@@ -304,7 +317,7 @@ export function closeSidebar() {
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
         <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
       </svg>
-      <p>Cliquez sur un quartier<br/>pour explorer ses données</p>
-    </div>`;
+          <p>Cliquez sur une zone<br/>pour explorer ses données</p>
+      </div>`;
   if (timelineChart) { timelineChart.destroy(); timelineChart = null; }
 }
