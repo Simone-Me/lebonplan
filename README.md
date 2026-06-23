@@ -23,6 +23,7 @@ Explorer, comprendre et comparer les dynamiques du logement et de la qualité de
 - Barres de progression ajoutées dans les scripts Bronze, Silver et Gold pour suivre l’avancement et estimer la fin des traitements
 - Bronze : `api_max_records` absent signifie maintenant récupération complète du dataset, sans fallback caché à `500`
 - Bronze : fallback automatique sur `exports/json` pour contourner la limite OpenDataSoft `offset + limit <= 10000`
+- Bronze : progression visible aussi pendant les gros téléchargements `exports/json`, et pas seulement à la fin du dataset
 
 ---
 
@@ -34,6 +35,7 @@ Explorer, comprendre et comparer les dynamiques du logement et de la qualité de
 - `2026-06-23` : ajout de barres de progression `tqdm` dans `bronze_feeder.py`, `silver_transformer.py` et `gold_aggregator.py` avec suivi par dataset, chunks MongoDB et étapes d’agrégation
 - `2026-06-23` : correction du Bronze pour que `api_max_records` commenté ou absent veuille dire “tout récupérer”, au lieu de retomber automatiquement à `500`
 - `2026-06-23` : ajout d’un fallback Bronze via `exports/json` pour les datasets OpenDataSoft dépassant la limite d’API paginée `offset + limit <= 10000`
+- `2026-06-23` : amélioration de la progression Bronze pour afficher l’avancement en octets pendant les gros exports JSON OpenDataSoft
 
 ---
 

@@ -20,6 +20,7 @@ import boto3
 from io import BytesIO
 from pathlib import Path
 from datetime import date
+from tempfile import SpooledTemporaryFile
 
 from config import (
     MINIO_ENDPOINT, MINIO_ACCESS_KEY, MINIO_SECRET_KEY,
@@ -33,6 +34,8 @@ ROOT = Path(__file__).parent.parent
 DATASRC = ROOT / "datasrc"
 PAGE_SIZE = 100
 JSON_MAX_ROWS = 50_000
+EXPORT_CHUNK_SIZE = 1024 * 1024
+EXPORT_SPOOL_MAX_SIZE = 25 * 1024 * 1024
 
 logging.basicConfig(
     level=logging.INFO,
@@ -425,15 +428,35 @@ def _fetch_api_export(dataset: dict, default_base_url: str, label: str) -> pd.Da
     requested_limit = _resolve_max_records(dataset)
 
     log.info(f"  Fetch {label} [{dataset_id}] via export JSON (full dataset)")
-    response = requests.get(export_url, timeout=120)
-    response.raise_for_status()
-    payload = response.json()
+    with requests.get(export_url, stream=True, timeout=(30, 300)) as response:
+        response.raise_for_status()
+        content_length = response.headers.get("content-length")
+        total_bytes = int(content_length) if content_length and content_length.isdigit() else None
+        download_progress = tqdm(
+            total=total_bytes,
+            desc=f"Export {dataset_id}",
+            unit="B",
+            unit_scale=True,
+            unit_divisor=1024,
+            leave=False,
+        )
+        with SpooledTemporaryFile(max_size=EXPORT_SPOOL_MAX_SIZE) as spool:
+            for chunk in response.iter_content(chunk_size=EXPORT_CHUNK_SIZE):
+                if not chunk:
+                    continue
+                spool.write(chunk)
+                download_progress.update(len(chunk))
+            download_progress.close()
+            spool.seek(0)
+            payload = json.load(spool)
+
     if not isinstance(payload, list):
         raise ValueError(f"Format export inattendu pour {dataset_id}: liste JSON attendue")
 
     if requested_limit is not None:
         payload = payload[:requested_limit]
 
+    log.info("    Normalisation JSON export en DataFrame...")
     df = pd.json_normalize(payload)
     log.info(f"    → {len(df)} lignes récupérées via export")
     return df
