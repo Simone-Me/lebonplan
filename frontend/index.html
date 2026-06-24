@@ -218,6 +218,33 @@
     <!-- ── Carte ──────────────────────────────────────────────────── -->
     <main id="map-area" aria-label="Carte de Paris">
       <div id="map"></div>
+
+      <!-- Classement Top 5 / Flop 5 -->
+      <div id="ranking-panel" class="ranking-panel" role="complementary" aria-label="Classement des zones">
+        <div class="ranking-header">
+          <span id="ranking-indicator-name">Score global</span>
+          <button id="ranking-toggle" class="ranking-toggle" title="Réduire" aria-label="Réduire le classement">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" width="13" height="13"><polyline points="18 15 12 9 6 15"></polyline></svg>
+          </button>
+        </div>
+        <div id="ranking-body">
+          <div class="ranking-section">
+            <div class="ranking-section-label ranking-label-top">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" width="10" height="10"><polyline points="18 15 12 9 6 15"></polyline></svg>
+              Top 5
+            </div>
+            <ol id="ranking-top" class="ranking-list" aria-label="5 meilleures zones"></ol>
+          </div>
+          <div class="ranking-divider"></div>
+          <div class="ranking-section">
+            <div class="ranking-section-label ranking-label-flop">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" width="10" height="10"><polyline points="6 9 12 15 18 9"></polyline></svg>
+              Flop 5
+            </div>
+            <ol id="ranking-flop" class="ranking-list" aria-label="5 zones les moins bien classées"></ol>
+          </div>
+        </div>
+      </div>
     </main>
 
   </div>

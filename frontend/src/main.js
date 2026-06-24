@@ -103,6 +103,7 @@ async function refreshMap(prefetchedGeojson = null) {
       updateMapData(geojson, currentIndicateur, INDICATEUR_LABELS[currentIndicateur], currentLevel) ??
       currentScale;
     updateLegend();
+    updateRanking();
     if (currentAreaSelection?.level === currentLevel) {
       syncSelectionFromArea(currentAreaSelection);
       openSidebar(currentAreaSelection, currentAnnee, getIndicatorScale, currentAreaSelection.level);
@@ -179,6 +180,75 @@ function updateLegend() {
   document.getElementById("legend-min").textContent = formatLegendValue(currentScale.min);
   document.getElementById("legend-max").textContent = formatLegendValue(currentScale.max);
   if (legendNote) legendNote.textContent = "";
+}
+
+/* ── Ranking Top 5 / Flop 5 ─────────────────────────────────────── */
+function getRankingIdField(level) {
+  if (level === "arrondissement") return "arrondissement";
+  if (level === "iris") return "iris_id";
+  return "quartier_id";
+}
+
+function renderRankingItems(listId, items, type) {
+  const list = document.getElementById(listId);
+  if (!list) return;
+  if (!items.length) {
+    list.innerHTML = `<li class="ranking-empty">—</li>`;
+    return;
+  }
+  list.innerHTML = items.map((item, i) => `
+    <li class="ranking-item" data-idx="${i}" role="button" tabindex="0"
+        aria-label="Aller à ${item.nom}">
+      <span class="ranking-rank">${i + 1}</span>
+      <span class="ranking-name" title="${item.nom}">${item.nom}</span>
+      <span class="ranking-value ${type}">${formatLegendValue(item.value)}</span>
+    </li>`).join("");
+
+  list.querySelectorAll(".ranking-item").forEach((li) => {
+    const idx = +li.dataset.idx;
+    const feature = items[idx]?.feature;
+    if (!feature) return;
+    const go = () => selectZoneFeature(feature);
+    li.addEventListener("click", go);
+    li.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") go(); });
+  });
+}
+
+function updateRanking() {
+  const nameEl = document.getElementById("ranking-indicator-name");
+  if (nameEl) nameEl.textContent = INDICATEUR_LABELS[currentIndicateur] || currentIndicateur;
+
+  const cache = geoJSONCache[currentLevel];
+  if (!cache?.features?.length) return;
+
+  const idField = getRankingIdField(currentLevel);
+  const withValues = cache.features
+    .map((f) => ({
+      nom: f.properties?.nom || "—",
+      value: f.properties?.[currentIndicateur] != null ? Number(f.properties[currentIndicateur]) : NaN,
+      id: f.properties?.[idField],
+      feature: f,
+    }))
+    .filter((item) => !Number.isNaN(item.value));
+
+  if (!withValues.length) return;
+
+  withValues.sort((a, b) => b.value - a.value);
+
+  renderRankingItems("ranking-top",  withValues.slice(0, 5), "top");
+  renderRankingItems("ranking-flop", [...withValues].slice(-5).reverse(), "flop");
+}
+
+function initRanking() {
+  const toggle = document.getElementById("ranking-toggle");
+  const body   = document.getElementById("ranking-body");
+  if (!toggle || !body) return;
+  toggle.addEventListener("click", () => {
+    const collapsed = body.classList.toggle("hidden");
+    toggle.classList.toggle("collapsed", collapsed);
+    toggle.title = collapsed ? "Développer" : "Réduire";
+    toggle.setAttribute("aria-label", collapsed ? "Développer le classement" : "Réduire le classement");
+  });
 }
 
 /* ── Zone search by name ─────────────────────────────────────────── */
@@ -386,6 +456,7 @@ function init() {
   initCompare(() => currentAnnee, clearCompareHighlights);
   initZoneSearch();
   initFavorites();
+  initRanking();
 
   /* Theme toggle — light ↔ dark */
   let isLight = true;

@@ -841,8 +841,11 @@ async function ensurePointIconLoaded(type) {
 
 async function renderPointLayer(type) {
   if (!map || !map.isStyleLoaded()) return;
-  const layerId = `points-${type}`;
-  const sourceId = `points-src-${type}`;
+  const layerId        = `points-${type}`;
+  const clusterCircleId = `points-cluster-${type}`;
+  const clusterCountId  = `points-cluster-count-${type}`;
+  const sourceId       = `points-src-${type}`;
+  const color          = POINT_COLORS[type] ?? "#6b7280";
 
   try {
     const geojson = await fetchPointsGeoJSON(type);
@@ -850,29 +853,75 @@ async function renderPointLayer(type) {
     if (map.getSource(sourceId)) {
       map.getSource(sourceId).setData(geojson);
     } else {
-      map.addSource(sourceId, { type: "geojson", data: geojson });
+      map.addSource(sourceId, {
+        type: "geojson",
+        data: geojson,
+        cluster: true,
+        clusterMaxZoom: 14,
+        clusterRadius: 40,
+      });
     }
 
     const iconId = await ensurePointIconLoaded(type);
 
+    /* ── Cluster circle ──────────────────────────────── */
+    if (!map.getLayer(clusterCircleId)) {
+      map.addLayer({
+        id: clusterCircleId,
+        type: "circle",
+        source: sourceId,
+        filter: ["has", "point_count"],
+        paint: {
+          "circle-color": color,
+          "circle-opacity": 0.82,
+          "circle-stroke-width": 2.5,
+          "circle-stroke-color": "#ffffff",
+          "circle-radius": [
+            "step", ["get", "point_count"],
+            13,    // < 10 points
+            10, 18, // ≥ 10
+            50, 24, // ≥ 50
+          ],
+        },
+      });
+    }
+
+    /* ── Cluster count label ─────────────────────────── */
+    if (!map.getLayer(clusterCountId)) {
+      map.addLayer({
+        id: clusterCountId,
+        type: "symbol",
+        source: sourceId,
+        filter: ["has", "point_count"],
+        layout: {
+          "text-field": ["to-string", ["get", "point_count"]],
+          "text-size": 11,
+          "text-font": ["Open Sans Semibold", "Arial Unicode MS Regular"],
+        },
+        paint: { "text-color": "#ffffff" },
+      });
+    }
+
+    /* ── Individual unclustered points ───────────────── */
     if (!map.getLayer(layerId)) {
       map.addLayer(iconId ? {
         id: layerId,
         type: "symbol",
         source: sourceId,
+        filter: ["!", ["has", "point_count"]],
         layout: {
           "icon-image": iconId,
-          "icon-size": 1,
-          "icon-allow-overlap": true,
-          "icon-ignore-placement": true,
+          "icon-size": 0.82,
+          "icon-allow-overlap": false,
         },
       } : {
         id: layerId,
         type: "circle",
         source: sourceId,
+        filter: ["!", ["has", "point_count"]],
         paint: {
           "circle-radius": 6,
-          "circle-color": POINT_COLORS[type] ?? "#6b7280",
+          "circle-color": color,
           "circle-stroke-width": 2,
           "circle-stroke-color": "#ffffff",
           "circle-opacity": 0.96,
@@ -880,11 +929,12 @@ async function renderPointLayer(type) {
       });
     }
 
-    if (map.getLayer(layerId)) {
-      map.moveLayer(layerId);
-    }
+    [clusterCircleId, clusterCountId, layerId].forEach((lid) => {
+      if (map.getLayer(lid)) map.moveLayer(lid);
+    });
 
     if (!pointLayerEventsBound.has(layerId)) {
+      /* hover / click on individual points */
       map.on("mouseenter", layerId, (e) => {
         map.getCanvas().style.cursor = "pointer";
         const feature = e.features?.[0];
@@ -902,9 +952,22 @@ async function renderPointLayer(type) {
       map.on("click", layerId, (e) => {
         const feature = e.features?.[0];
         if (!feature) return;
-        map.getCanvas().style.cursor = "pointer";
         openPinnedPointPopup(type, feature, e.lngLat);
       });
+
+      /* click on cluster → zoom to expand */
+      map.on("click", clusterCircleId, (e) => {
+        const features = map.queryRenderedFeatures(e.point, { layers: [clusterCircleId] });
+        const clusterId = features[0]?.properties?.cluster_id;
+        if (clusterId == null) return;
+        map.getSource(sourceId).getClusterExpansionZoom(clusterId, (err, zoom) => {
+          if (err) return;
+          map.easeTo({ center: features[0].geometry.coordinates, zoom: zoom + 0.5 });
+        });
+      });
+      map.on("mouseenter", clusterCircleId, () => { map.getCanvas().style.cursor = "pointer"; });
+      map.on("mouseleave", clusterCircleId, () => { map.getCanvas().style.cursor = ""; });
+
       pointLayerEventsBound.add(layerId);
     }
   } catch (_) { /* silently ignore if API unavailable */ }
@@ -912,10 +975,15 @@ async function renderPointLayer(type) {
 
 function removePointLayer(type) {
   if (!map) return;
-  const layerId = `points-${type}`;
-  const sourceId = `points-src-${type}`;
-  if (map.getLayer(layerId)) map.removeLayer(layerId);
+  const layerId         = `points-${type}`;
+  const clusterCircleId = `points-cluster-${type}`;
+  const clusterCountId  = `points-cluster-count-${type}`;
+  const sourceId        = `points-src-${type}`;
+  [clusterCountId, clusterCircleId, layerId].forEach((lid) => {
+    if (map.getLayer(lid)) map.removeLayer(lid);
+  });
   if (map.getSource(sourceId)) map.removeSource(sourceId);
+  pointLayerEventsBound.delete(layerId);
 }
 
 function restoreActivePointLayers() {
