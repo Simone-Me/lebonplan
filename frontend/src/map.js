@@ -1,5 +1,11 @@
 import maplibregl from "maplibre-gl";
 import { fetchPointsGeoJSON } from "./api.js";
+import bikeSvg from "lucide-static/icons/bike.svg?raw";
+import filmSvg from "lucide-static/icons/film.svg?raw";
+import landmarkSvg from "lucide-static/icons/landmark.svg?raw";
+import librarySvg from "lucide-static/icons/library.svg?raw";
+import treesSvg from "lucide-static/icons/trees.svg?raw";
+import trainFrontTunnelSvg from "lucide-static/icons/train-front-tunnel.svg?raw";
 
 let map = null;
 let popup = null;
@@ -7,7 +13,13 @@ let isDark = false;
 let currentGeoJSON = { type: "FeatureCollection", features: [] };
 let currentMarker = null;
 let currentAreaLevel = "quartier";
+let currentSelection = null;
 let mapLevelSyncHandler = null;
+const selectionGeoJSONCache = {
+  arrondissement: null,
+  quartier: null,
+  iris: null,
+};
 let currentScale = {
   min: 0,
   max: 100,
@@ -28,6 +40,75 @@ const STYLES = {
   light: "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json",
   dark:  "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json",
 };
+const SELECTION_COLORS = {
+  arrondissement: "#ffffff",
+  quartier: "#111827",
+  iris: "#130bf5",
+};
+const SELECTION_FILL_COLORS = {
+  arrondissement: "rgba(255,255,255,0.18)",
+  quartier: "rgba(15,23,42,0.14)",
+  iris: "rgba(245,158,11,0.18)",
+};
+
+function emptyFeatureCollection() {
+  return { type: "FeatureCollection", features: [] };
+}
+
+function oneFeatureCollection(feature) {
+  if (!feature) return emptyFeatureCollection();
+  return { type: "FeatureCollection", features: [feature] };
+}
+
+function setSelectionSourceData(sourceId, feature) {
+  const src = map?.getSource(sourceId);
+  if (!src) return;
+  src.setData(oneFeatureCollection(feature));
+}
+
+function getCachedAreaFeature(level, id) {
+  const cache = selectionGeoJSONCache[level];
+  if (!cache?.features?.length || id == null || id === "") return null;
+
+  const field = level === "arrondissement"
+    ? "arrondissement"
+    : level === "iris"
+      ? "iris_id"
+      : "quartier_id";
+
+  return cache.features.find((feature) => {
+    const props = feature?.properties || {};
+    if (field === "arrondissement") {
+      return Number(props[field]) === Number(id);
+    }
+    return String(props[field] ?? "") === String(id);
+  }) || null;
+}
+
+function getParentFeatures() {
+  if (!currentSelection) {
+    return { arrondissement: null, quartier: null, iris: null };
+  }
+
+  const selectionLevel = currentSelection.level;
+  const arrFeature = selectionLevel === "arrondissement"
+    ? currentSelection.feature
+    : currentSelection.arrondissement != null
+      ? getCachedAreaFeature("arrondissement", currentSelection.arrondissement)
+      : null;
+  const quartierFeature = currentSelection.quartierId
+    ? selectionLevel === "quartier"
+      ? currentSelection.feature
+      : getCachedAreaFeature("quartier", currentSelection.quartierId)
+    : null;
+  const irisFeature = selectionLevel === "iris" ? currentSelection.feature : null;
+
+  return {
+    arrondissement: arrFeature,
+    quartier: quartierFeature,
+    iris: irisFeature,
+  };
+}
 
 function scoreToColor(steps) {
   return ["interpolate", ["linear"], ["get", "__score"]].concat(
@@ -35,7 +116,31 @@ function scoreToColor(steps) {
   );
 }
 
-function computeScale(values) {
+function quantile(sortedValues, q) {
+  if (!sortedValues.length) return NaN;
+  if (sortedValues.length === 1) return sortedValues[0];
+  const index = (sortedValues.length - 1) * q;
+  const lower = Math.floor(index);
+  const upper = Math.ceil(index);
+  if (lower === upper) return sortedValues[lower];
+  const weight = index - lower;
+  return sortedValues[lower] * (1 - weight) + sortedValues[upper] * weight;
+}
+
+function dedupeStepValues(steps) {
+  const deduped = [];
+  for (const [value, color] of steps) {
+    const previous = deduped[deduped.length - 1];
+    if (previous && previous[0] === value) {
+      previous[1] = color;
+      continue;
+    }
+    deduped.push([value, color]);
+  }
+  return deduped;
+}
+
+function computeScale(values, strategy = "linear") {
   const finiteValues = values.filter((value) => Number.isFinite(value));
   if (!finiteValues.length) {
     return {
@@ -43,16 +148,17 @@ function computeScale(values) {
       max: 100,
       steps: [
         [0, "#ef4444"],
-        [25, "#f97316"],
-        [50, "#f59e0b"],
-        [75, "#84cc16"],
+        [40, "#f97316"],
+        [70, "#f59e0b"],
+        [85, "#84cc16"],
         [100, "#22c55e"],
       ],
     };
   }
 
-  const min = Math.min(...finiteValues);
-  const max = Math.max(...finiteValues);
+  const sortedValues = [...finiteValues].sort((a, b) => a - b);
+  const min = sortedValues[0];
+  const max = sortedValues[sortedValues.length - 1];
   if (min === max) {
     return {
       min,
@@ -61,6 +167,20 @@ function computeScale(values) {
         [min, "#f59e0b"],
         [min + 1e-6, "#f59e0b"],
       ],
+    };
+  }
+
+  if (strategy === "quantile") {
+    return {
+      min,
+      max,
+      steps: dedupeStepValues([
+        [min, "#ef4444"],
+        [quantile(sortedValues, 0.25), "#f97316"],
+        [quantile(sortedValues, 0.5), "#f59e0b"],
+        [quantile(sortedValues, 0.75), "#84cc16"],
+        [max, "#22c55e"],
+      ]),
     };
   }
 
@@ -89,6 +209,12 @@ function reverseScale(scale) {
 
 function toNumericOrNaN(value) {
   return value == null ? NaN : Number(value);
+}
+
+function getScaleStrategy(indicator) {
+  if (!indicator) return "linear";
+  if (indicator.startsWith("score_")) return "quantile";
+  return "linear";
 }
 
 function applyCurrentScale() {
@@ -126,24 +252,75 @@ function getLineOpacity(isActive) {
   return isActive ? 0.95 : 0;
 }
 
+function getEmptyFilter(level = currentAreaLevel) {
+  if (level === "arrondissement") return ["==", "arrondissement", -1];
+  if (level === "iris") return ["==", "iris_id", ""];
+  return ["==", "quartier_id", ""];
+}
+
+function applySelectionLayers() {
+  if (!map) return;
+
+  const selectionLevel = currentSelection?.level || null;
+  const parents = getParentFeatures();
+  const hasArrondissement = Boolean(parents.arrondissement);
+  const hasQuartier = Boolean(parents.quartier);
+  const hasIris = Boolean(parents.iris);
+
+  setSelectionSourceData("selection-arr-source", parents.arrondissement);
+  setSelectionSourceData("selection-quartier-source", parents.quartier);
+  setSelectionSourceData("selection-iris-source", parents.iris);
+
+  map.setPaintProperty("selection-arr-border", "line-opacity", hasArrondissement ? 1 : 0);
+  map.setPaintProperty("selection-arr-border", "line-color", SELECTION_COLORS.arrondissement);
+  map.setPaintProperty("selection-arr-border", "line-width", selectionLevel === "arrondissement" ? 6 : 4.8);
+
+  map.setPaintProperty("selection-quartier-border", "line-opacity", hasQuartier && (selectionLevel === "quartier" || selectionLevel === "iris") ? 1 : 0);
+  map.setPaintProperty("selection-quartier-border", "line-color", SELECTION_COLORS.quartier);
+  map.setPaintProperty("selection-quartier-border", "line-width", selectionLevel === "quartier" ? 5 : 4.2);
+
+  map.setPaintProperty("selection-iris-border", "line-opacity", selectionLevel === "iris" && hasIris ? 1 : 0);
+  map.setPaintProperty("selection-iris-border", "line-color", SELECTION_COLORS.iris);
+  map.setPaintProperty("selection-iris-border", "line-width", 4);
+}
+
+function updateSelectionFromFeature(feature) {
+  const props = feature?.properties || {};
+  const areaId = getAreaIdValue(props);
+  if (areaId == null || areaId === "") return;
+
+  currentSelection = {
+    level: currentAreaLevel,
+    areaId,
+    feature,
+    arrondissement: Number.isFinite(Number(props.arrondissement)) ? Number(props.arrondissement) : null,
+    quartierId: typeof props.quartier_id === "string" ? props.quartier_id : null,
+    irisId: typeof props.iris_id === "string" ? props.iris_id : null,
+  };
+  applySelectionLayers();
+}
+
+function findFeatureBySelection(selection) {
+  if (!selection?.level || !currentGeoJSON?.features?.length) return null;
+  const field = getAreaIdField(selection.level);
+  const targetId = selection.area_id ?? selection.areaId;
+  if (targetId == null || targetId === "") return null;
+
+  return currentGeoJSON.features.find((feature) => {
+    const props = feature?.properties || {};
+    if (selection.level === "arrondissement") {
+      return Number(props[field]) === Number(targetId);
+    }
+    return String(props[field] ?? "") === String(targetId);
+  }) || null;
+}
+
 function setupLayers() {
   if (map.getSource("quartiers")) return;
 
   map.addSource("quartiers", {
     type: "geojson",
     data: currentGeoJSON,
-  });
-
-  // Arrondissement highlight (sous le fill principal)
-  map.addLayer({
-    id: "arrondissement-highlight",
-    type: "fill",
-    source: "quartiers",
-    filter: ["==", "arrondissement", -1],
-    paint: {
-      "fill-color": "#ffffff",
-      "fill-opacity": 0.18,
-    },
   });
 
   map.addLayer({
@@ -167,16 +344,49 @@ function setupLayers() {
     },
   });
 
-  // Bordure arrondissement (ligne épaisse autour des quartiers du même arrondissement)
+  map.addSource("selection-arr-source", {
+    type: "geojson",
+    data: emptyFeatureCollection(),
+  });
+  map.addSource("selection-quartier-source", {
+    type: "geojson",
+    data: emptyFeatureCollection(),
+  });
+  map.addSource("selection-iris-source", {
+    type: "geojson",
+    data: emptyFeatureCollection(),
+  });
+
   map.addLayer({
-    id: "arrondissement-border",
+    id: "selection-arr-border",
     type: "line",
-    source: "quartiers",
-    filter: ["==", "arrondissement", -1],
+    source: "selection-arr-source",
     paint: {
-      "line-color": "#ffffff",
-      "line-width": 2.5,
-      "line-opacity": 0.9,
+      "line-color": SELECTION_COLORS.arrondissement,
+      "line-width": 5.2,
+      "line-opacity": 0,
+    },
+  });
+
+  map.addLayer({
+    id: "selection-quartier-border",
+    type: "line",
+    source: "selection-quartier-source",
+    paint: {
+      "line-color": SELECTION_COLORS.quartier,
+      "line-width": 4.6,
+      "line-opacity": 0,
+    },
+  });
+
+  map.addLayer({
+    id: "selection-iris-border",
+    type: "line",
+    source: "selection-iris-source",
+    paint: {
+      "line-color": SELECTION_COLORS.iris,
+      "line-width": 3.6,
+      "line-opacity": 0,
     },
   });
 
@@ -227,18 +437,6 @@ function setupLayers() {
       "line-opacity": 0,
     },
   });
-
-  map.addLayer({
-    id: "quartiers-selected",
-    type: "line",
-    source: "quartiers",
-    filter: ["==", "quartier_id", ""],
-    paint: {
-      "line-color": "#ffffff",
-      "line-width": 3.2,
-      "line-opacity": 1,
-    },
-  });
 }
 
 function attachEvents(onQuartierClick) {
@@ -282,13 +480,7 @@ function attachEvents(onQuartierClick) {
       arrondissement: props.arrondissement,
     });
 
-    map.setFilter("quartiers-selected", getSelectionFilter(areaId));
-
-    if (props.arrondissement != null) {
-      const arr = Number(props.arrondissement);
-      map.setFilter("arrondissement-highlight", ["==", "arrondissement", arr]);
-      map.setFilter("arrondissement-border",    ["==", "arrondissement", arr]);
-    }
+    updateSelectionFromFeature(e.features[0]);
   });
 }
 
@@ -338,6 +530,7 @@ export function setMapTheme(dark, onReady) {
       const src = map.getSource("quartiers");
       if (src) src.setData(currentGeoJSON);
       applyCurrentScale();
+      applySelectionLayers();
       restoreActivePointLayers();
       onReady?.();
     } else {
@@ -360,20 +553,20 @@ export function updateMapData(geojson, indicateur, indicateurLabel, areaLevel = 
     },
   }));
 
+  const indicatorValues = features.map((feature) => toNumericOrNaN(feature.properties.__score));
   const baseScale = computeScale(
-    features.map((feature) => {
-      return toNumericOrNaN(feature.properties.__score);
-    })
+    indicatorValues,
+    getScaleStrategy(indicateur)
   );
   currentScale = REVERSED_SCALE_INDICATORS.has(indicateur)
     ? reverseScale(baseScale)
     : baseScale;
   Object.assign(currentScalesByIndicator, {
-    score_global: computeScale(features.map((feature) => toNumericOrNaN(feature.properties.score_global))),
-    score_qualite_vie: computeScale(features.map((feature) => toNumericOrNaN(feature.properties.score_qualite_vie))),
-    score_transports: computeScale(features.map((feature) => toNumericOrNaN(feature.properties.score_transports))),
-    score_loisirs: computeScale(features.map((feature) => toNumericOrNaN(feature.properties.score_loisirs))),
-    score_services: computeScale(features.map((feature) => toNumericOrNaN(feature.properties.score_services))),
+    score_global: computeScale(features.map((feature) => toNumericOrNaN(feature.properties.score_global)), "quantile"),
+    score_qualite_vie: computeScale(features.map((feature) => toNumericOrNaN(feature.properties.score_qualite_vie)), "quantile"),
+    score_transports: computeScale(features.map((feature) => toNumericOrNaN(feature.properties.score_transports)), "quantile"),
+    score_loisirs: computeScale(features.map((feature) => toNumericOrNaN(feature.properties.score_loisirs)), "quantile"),
+    score_services: computeScale(features.map((feature) => toNumericOrNaN(feature.properties.score_services)), "quantile"),
     prix_m2_median: computeScale(features.map((feature) => toNumericOrNaN(feature.properties.prix_m2_median))),
     nb_logements_sociaux: computeScale(features.map((feature) => toNumericOrNaN(feature.properties.nb_logements_sociaux))),
   });
@@ -385,7 +578,9 @@ export function updateMapData(geojson, indicateur, indicateurLabel, areaLevel = 
   const src = map.getSource("quartiers");
   if (src) src.setData(currentGeoJSON);
   applyCurrentScale();
-  clearAreaSelection();
+  applySelectionLayers();
+  restoreActivePointLayers();
+  map.triggerRepaint?.();
 
   return { min: currentScale.min, max: currentScale.max };
 }
@@ -452,13 +647,39 @@ export function clearCompareHighlights() {
 
 export function clearAreaSelection() {
   if (!map) return;
-  map.setFilter("quartiers-selected", getSelectionFilter(null));
-  map.setFilter("arrondissement-highlight", ["==", "arrondissement", -1]);
-  map.setFilter("arrondissement-border", ["==", "arrondissement", -1]);
+  currentSelection = null;
+  setSelectionSourceData("selection-arr-source", null);
+  setSelectionSourceData("selection-quartier-source", null);
+  setSelectionSourceData("selection-iris-source", null);
+  map.setPaintProperty("selection-arr-border", "line-opacity", 0);
+  map.setPaintProperty("selection-quartier-border", "line-opacity", 0);
+  map.setPaintProperty("selection-iris-border", "line-opacity", 0);
 }
 
 export function setMapLevelSyncHandler(handler) {
   mapLevelSyncHandler = handler;
+}
+
+export function setSelectionGeoJSONCache(level, geojson) {
+  if (!level || !(level in selectionGeoJSONCache)) return;
+  selectionGeoJSONCache[level] = geojson || emptyFeatureCollection();
+  if (currentSelection) {
+    applySelectionLayers();
+  }
+}
+
+export function syncSelectionFromArea(selection) {
+  if (!selection) {
+    clearAreaSelection();
+    return false;
+  }
+  const feature = findFeatureBySelection(selection);
+  if (!feature) {
+    clearAreaSelection();
+    return false;
+  }
+  updateSelectionFromFeature(feature);
+  return true;
 }
 
 // ─── Couche de points Silver ──────────────────────────────────────────────────
@@ -471,8 +692,122 @@ const POINT_COLORS = {
   cinemas:       "#ec4899",
   bibliotheques: "#14b8a6",
 };
+const POINT_ICONS = {
+  velib: bikeSvg,
+  cinemas: filmSvg,
+  bibliotheques: librarySvg,
+  espaces_verts: treesSvg,
+  musees: landmarkSvg,
+  gares: trainFrontTunnelSvg,
+};
+const POINT_ICON_SIZE = 25;
 
-const _pointPopup = new maplibregl.Popup({ closeButton: false, closeOnClick: false });
+const POINT_POPUP_OFFSET = [0, 14];
+const _pointHoverPopup = new maplibregl.Popup({
+  closeButton: false,
+  closeOnClick: false,
+  className: "map-popup map-popup-point",
+  anchor: "top",
+  offset: POINT_POPUP_OFFSET,
+});
+const _pointPinnedPopup = new maplibregl.Popup({
+  closeButton: true,
+  closeOnClick: false,
+  className: "map-popup map-popup-point",
+  anchor: "top",
+  offset: POINT_POPUP_OFFSET,
+});
+let _pinnedPointId = null;
+
+function getPointPopupId(type, feature) {
+  const props = feature?.properties || {};
+  const geometry = feature?.geometry?.coordinates || [];
+  return [
+    type,
+    props.nom || "",
+    props.id || "",
+    props.identifiant || "",
+    geometry[0] ?? "",
+    geometry[1] ?? "",
+  ].join("|");
+}
+
+function getPointLngLat(feature, fallbackLngLat) {
+  const coords = feature?.geometry?.coordinates;
+  if (Array.isArray(coords) && coords.length >= 2) {
+    return coords;
+  }
+  return fallbackLngLat;
+}
+
+function getPointPopupHTML(type, feature) {
+  const props = feature?.properties || {};
+  return `<strong>${props.nom || type}</strong><br/><span style="color:#94a3b8;font-size:11px">${type}</span>`;
+}
+
+function openPinnedPointPopup(type, feature, fallbackLngLat) {
+  if (!map || !feature) return;
+  _pinnedPointId = getPointPopupId(type, feature);
+  _pointHoverPopup.remove();
+  _pointPinnedPopup
+    .setLngLat(getPointLngLat(feature, fallbackLngLat))
+    .setHTML(getPointPopupHTML(type, feature))
+    .addTo(map);
+}
+
+_pointPinnedPopup.on("close", () => {
+  _pinnedPointId = null;
+});
+
+function svgToDataUrl(svg) {
+  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+}
+
+function buildPointIconSvg(type) {
+  const iconSvg = POINT_ICONS[type];
+  if (!iconSvg) return null;
+
+  const innerSvg = iconSvg
+    .replace(/<svg[^>]*>/i, "")
+    .replace(/<\/svg>\s*$/i, "")
+    .trim();
+
+  const color = POINT_COLORS[type] ?? "#6b7280";
+  return `
+    <svg xmlns="http://www.w3.org/2000/svg" width="${POINT_ICON_SIZE}" height="${POINT_ICON_SIZE}" viewBox="0 0 40 40">
+      <circle cx="20" cy="20" r="16" fill="${color}" />
+      <circle cx="20" cy="20" r="15.25" fill="none" stroke="rgba(255,255,255,0.94)" stroke-width="1.5" />
+      <g transform="translate(8 8)" stroke="#ffffff" fill="none" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+        ${innerSvg}
+      </g>
+    </svg>
+  `.trim();
+}
+
+function loadImageElement(src) {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = reject;
+    image.src = src;
+  });
+}
+
+async function ensurePointIconLoaded(type) {
+  if (!map) return null;
+
+  const iconId = `point-icon-${type}`;
+  if (map.hasImage(iconId)) return iconId;
+
+  const svg = buildPointIconSvg(type);
+  if (!svg) return null;
+
+  const image = await loadImageElement(svgToDataUrl(svg));
+  if (!map.hasImage(iconId)) {
+    map.addImage(iconId, image);
+  }
+  return iconId;
+}
 
 async function renderPointLayer(type) {
   if (!map || !map.isStyleLoaded()) return;
@@ -488,8 +823,20 @@ async function renderPointLayer(type) {
       map.addSource(sourceId, { type: "geojson", data: geojson });
     }
 
+    const iconId = await ensurePointIconLoaded(type);
+
     if (!map.getLayer(layerId)) {
-      map.addLayer({
+      map.addLayer(iconId ? {
+        id: layerId,
+        type: "symbol",
+        source: sourceId,
+        layout: {
+          "icon-image": iconId,
+          "icon-size": 1,
+          "icon-allow-overlap": true,
+          "icon-ignore-placement": true,
+        },
+      } : {
         id: layerId,
         type: "circle",
         source: sourceId,
@@ -503,18 +850,30 @@ async function renderPointLayer(type) {
       });
     }
 
+    if (map.getLayer(layerId)) {
+      map.moveLayer(layerId);
+    }
+
     if (!pointLayerEventsBound.has(layerId)) {
       map.on("mouseenter", layerId, (e) => {
         map.getCanvas().style.cursor = "pointer";
-        const props = e.features[0].properties;
-        _pointPopup
-          .setLngLat(e.lngLat)
-          .setHTML(`<strong>${props.nom || type}</strong><br/><span style="color:#94a3b8;font-size:11px">${type}</span>`)
+        const feature = e.features?.[0];
+        if (!feature) return;
+        if (_pinnedPointId === getPointPopupId(type, feature)) return;
+        _pointHoverPopup
+          .setLngLat(getPointLngLat(feature, e.lngLat))
+          .setHTML(getPointPopupHTML(type, feature))
           .addTo(map);
       });
       map.on("mouseleave", layerId, () => {
         map.getCanvas().style.cursor = "";
-        _pointPopup.remove();
+        _pointHoverPopup.remove();
+      });
+      map.on("click", layerId, (e) => {
+        const feature = e.features?.[0];
+        if (!feature) return;
+        map.getCanvas().style.cursor = "pointer";
+        openPinnedPointPopup(type, feature, e.lngLat);
       });
       pointLayerEventsBound.add(layerId);
     }

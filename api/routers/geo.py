@@ -67,6 +67,22 @@ _POINT_LOCATION_CANDIDATES = [
 _s3_client = None
 
 
+def _resolve_available_year(db: Session, table_name: str, requested_year: int | None, fallback_year: int = 2024) -> int:
+    if requested_year is None:
+        row = db.execute(text(f"SELECT MAX(annee) FROM {table_name}")).fetchone()
+        return row[0] if row and row[0] else fallback_year
+
+    row = db.execute(
+        text(f"SELECT MAX(annee) FROM {table_name} WHERE annee <= :annee"),
+        {"annee": requested_year},
+    ).fetchone()
+    if row and row[0]:
+        return row[0]
+
+    row = db.execute(text(f"SELECT MIN(annee) FROM {table_name}")).fetchone()
+    return row[0] if row and row[0] else requested_year
+
+
 def _get_s3_client():
     global _s3_client
     if _s3_client is None:
@@ -270,9 +286,7 @@ def get_arrondissements_geojson(
     db: Session = Depends(get_db),
 ):
     """GeoJSON FeatureCollection des 20 arrondissements avec KPIs."""
-    if annee is None:
-        row = db.execute(text("SELECT MAX(annee) FROM gold.arrondissement_kpis")).fetchone()
-        annee = row[0] if row and row[0] else 2024
+    annee = _resolve_available_year(db, "gold.arrondissement_kpis", annee)
 
     sql = text("""
         SELECT
@@ -366,9 +380,7 @@ def get_quartiers_geojson(
     db: Session = Depends(get_db),
 ):
     """GeoJSON FeatureCollection des 80 quartiers administratifs avec KPIs."""
-    if annee is None:
-        row = db.execute(text("SELECT MAX(annee) FROM gold.quartier_kpis")).fetchone()
-        annee = row[0] if row and row[0] else 2024
+    annee = _resolve_available_year(db, "gold.quartier_kpis", annee)
 
     sql = text("""
         SELECT
@@ -458,9 +470,7 @@ def get_iris_geojson(
     db: Session = Depends(get_db),
 ):
     """GeoJSON FeatureCollection des IRIS de Paris avec KPIs."""
-    if annee is None:
-        row = db.execute(text("SELECT MAX(annee) FROM gold.iris_kpis")).fetchone()
-        annee = row[0] if row and row[0] else 2024
+    annee = _resolve_available_year(db, "gold.iris_kpis", annee)
 
     sql = text("""
         SELECT

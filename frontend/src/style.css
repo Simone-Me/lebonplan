@@ -1117,7 +1117,10 @@ body.is-resizing #sidebar-resizer::before {
   box-shadow: 0 4px 16px rgba(0,0,0,0.4);
   font-family: "Inter", system-ui, sans-serif;
 }
-.map-popup .maplibregl-popup-tip { border-top-color: var(--sb-surface) !important; }
+.map-popup.maplibregl-popup-anchor-bottom .maplibregl-popup-tip { border-top-color: var(--sb-surface) !important; }
+.map-popup.maplibregl-popup-anchor-top .maplibregl-popup-tip { border-bottom-color: var(--sb-surface) !important; }
+.map-popup.maplibregl-popup-anchor-left .maplibregl-popup-tip { border-right-color: var(--sb-surface) !important; }
+.map-popup.maplibregl-popup-anchor-right .maplibregl-popup-tip { border-left-color: var(--sb-surface) !important; }
 
 @media (max-width: 900px) {
   #sidebar {
