@@ -17,6 +17,7 @@ Explorer, comprendre et comparer les dynamiques du logement et de la qualité de
 
 ## Dernières évolutions
 
+- **Drill-down géographique IRIS** : intégration du référentiel IRIS Île-de-France filtré à Paris, géométries `gold.iris_geo`, KPI `gold.iris_kpis`, switch frontend `arrondissement / quartier / IRIS`
 - **Revenus médians INSEE Filosofi 2021** : ingestion Bronze (CSV chunked), transformation Silver, agrégation Gold (`revenu_median_uc`) et calcul `taux_effort_achat` = prix_m2 × 50 / revenu médian
 - **Répartition parc immobilier** : comptage T1/T2/T3/T4+ par tranche de surface, donut chart Chart.js dans la sidebar, `surface_mediane`, `nb_appartements`, `nb_maisons`, `pct_appartements`
 - **Couches de points sur la carte** : 6 couches togglables (gares, Vélib, espaces verts, musées, cinémas, bibliothèques) — endpoint `/api/geo/points`, circles MapLibre avec popup hover
@@ -37,6 +38,8 @@ Explorer, comprendre et comparer les dynamiques du logement et de la qualité de
 
 ## Journal de travail
 
+- `2026-06-24` : intégration IRIS Paris — géométries OpenData Île-de-France, agrégation Gold, endpoints dédiés, drill-down synchronisé avec le zoom
+- `2026-06-24` : fallback API sur la dernière année disponible pour éviter les cartes IRIS vides quand une année n’a pas encore été matérialisée
 - `2026-06-23` : revenus médians INSEE Filosofi 2021 (GAP 1) — bronze → silver → gold → API → frontend
 - `2026-06-23` : répartition types de logement + donut chart (GAP 2)
 - `2026-06-23` : couches de points togglables sur la carte (GAP 3)
@@ -57,13 +60,13 @@ APIs / fichiers locaux (CSV, GeoJSON, Parquet)
               ↓  bronze_feeder.py
   [Bronze — MinIO Parquet]         ← copie brute immuable, partitionnée par ingestion_date
               ↓  silver_transformer.py
-  [Silver — MongoDB]               ← nettoyage, typage, géocodage WGS84, spatialisation quartier
+  [Silver — MongoDB]               ← nettoyage, typage, géocodage WGS84, spatialisation quartier + IRIS
               ↓  gold_aggregator.py
-  [Gold — PostgreSQL / PostGIS]    ← KPIs agrégés par quartier × année, géométries polygones
+  [Gold — PostgreSQL / PostGIS]    ← KPIs agrégés par arrondissement / quartier / IRIS × année, géométries polygones
               ↓  FastAPI (JWT)
   [API REST]                       ← /api/geo, /api/kpis, /api/timeline, /api/compare, /api/geo/points
               ↓  MapLibre GL JS + Chart.js
-  [Dashboard web interactif]       ← choroplèthe + points + timeline + comparaison + géocodage BAN
+  [Dashboard web interactif]       ← choroplèthe 3 niveaux + points + timeline + comparaison + géocodage BAN
 ```
 
 Le pipeline est exécuté automatiquement chaque nuit via le scheduler APScheduler (service `scheduler` Docker).  
@@ -136,6 +139,7 @@ python pipeline/gold_aggregator.py
 
 > Le scheduler Docker reprend ensuite automatiquement chaque nuit.  
 > Pour forcer une exécution immédiate via Docker : `PIPELINE_RUN_ON_START=true docker-compose up scheduler`
+> Après l’intégration IRIS, relancer `python pipeline/gold_aggregator.py` sans année permet aussi de matérialiser l’historique complet des KPI IRIS.
 
 ### 5. API
 
@@ -262,11 +266,14 @@ npm run dev
 | GET | `/api/auth/me` | Vérification token |
 | GET | `/api/geo/arrondissements` | GeoJSON 20 arrondissements + KPIs |
 | GET | `/api/geo/quartiers` | GeoJSON 80 quartiers + KPIs |
+| GET | `/api/geo/iris` | GeoJSON IRIS de Paris + KPIs |
 | **GET** | **`/api/geo/points?type=`** | **GeoJSON points Silver (gares\|velib\|espaces_verts\|musees\|cinemas\|bibliotheques)** |
 | GET | `/api/kpis/{1-20}` | KPIs arrondissement |
 | GET | `/api/kpis/quartier/{id}` | KPIs quartier |
+| GET | `/api/kpis/iris/{id}` | KPIs IRIS |
 | GET | `/api/timeline/{1-20}` | Évolution temporelle arrondissement |
 | GET | `/api/timeline/quartier/{id}` | Évolution temporelle quartier |
+| GET | `/api/timeline/iris/{id}` | Évolution temporelle IRIS |
 | GET | `/api/compare?arr1=X&arr2=Y` | Comparaison côte à côte |
 | GET | `/api/health` | Santé API |
 
@@ -284,7 +291,7 @@ Docs Swagger : `http://localhost:8000/docs`
 | Ingestion | Python + pandas + boto3 | Multi-formats, upload S3 |
 | Bronze | MinIO (S3) + Parquet | Stockage immuable, columnar, partitionné |
 | Silver | MongoDB 7 + PyMongo | Schéma flexible, index `2dsphere` |
-| Gold | PostgreSQL 16 + PostGIS | KPIs tabulaires, jointures géospatiales |
+| Gold | PostgreSQL 16 + PostGIS | KPIs tabulaires, jointures géospatiales, hiérarchie arrondissement / quartier / IRIS |
 | Scheduler | APScheduler | Cron Python natif, aucune dépendance externe |
 | API | FastAPI + SQLAlchemy + PyMongo | Performance, docs auto, dual DB |
 | Auth | JWT (python-jose) | Stateless, compatible multi-instance |
@@ -338,9 +345,10 @@ Docs Swagger : `http://localhost:8000/docs`
 
 ## Logique cartographique
 
-**Niveau affiché** : 80 quartiers administratifs (source : Paris Open Data)  
+**Niveaux affichés** : 20 arrondissements, 80 quartiers administratifs, 992 IRIS parisiens  
 **Fond de carte** : tuiles vectorielles CartoDB Positron / Dark Matter  
-**Choroplèthe** : échelle dynamique calculée sur les valeurs réelles de chaque indicateur
+**Choroplèthe** : échelle dynamique calculée sur les valeurs réelles de chaque indicateur  
+**Drill-down** : changement manuel via boutons ou automatique selon le zoom
 
 **Couches de points Silver** (togglables via les checkboxes) :
 - Gares IDFM (jaune)
@@ -350,7 +358,8 @@ Docs Swagger : `http://localhost:8000/docs`
 - Cinémas (rose)
 - Bibliothèques (teal)
 
-**Comparaison** : arrondissement vs arrondissement, ou quartier vs quartier (radar + tableau).
+**Comparaison** : arrondissement vs arrondissement, ou quartier vs quartier (radar + tableau).  
+Le mode comparaison reste volontairement limité à ces deux niveaux pour conserver une lecture claire.
 
 Pour la logique détaillée : `docs/carte-detaillee-paris.md`
 
