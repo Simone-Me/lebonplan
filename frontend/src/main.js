@@ -8,6 +8,7 @@ import {
   togglePointLayer,
   clearAreaSelection,
   setMapLevelSyncHandler,
+  setSelectionGeoJSONCache,
 } from "./map.js";
 import { openSidebar, closeSidebar } from "./sidebar.js";
 import { initCompare } from "./compare.js";
@@ -30,6 +31,12 @@ let currentIndicateur = "score_global";
 let currentScale = { min: 0, max: 100 };
 let currentLevel = "quartier";
 let hasLoadedData = false;
+let selectionCachesReady = false;
+const LEVEL_ORDER = {
+  arrondissement: 0,
+  quartier: 1,
+  iris: 2,
+};
 
 function initSidebarUI() {
   const root = document.documentElement;
@@ -90,6 +97,7 @@ function formatLegendValue(value) {
 async function refreshMap() {
   try {
     const geojson = await fetchGeoJSON(currentAnnee, currentIndicateur, currentLevel);
+    setSelectionGeoJSONCache(currentLevel, geojson);
     currentScale =
       updateMapData(geojson, currentIndicateur, INDICATEUR_LABELS[currentIndicateur], currentLevel) ??
       currentScale;
@@ -115,6 +123,19 @@ async function setCurrentLevel(level, { force = false } = {}) {
   clearAreaSelection();
   closeSidebar();
   await refreshMap();
+}
+
+async function preloadSelectionCaches() {
+  if (selectionCachesReady) return;
+  const [arr, quartier, iris] = await Promise.all([
+    fetchGeoJSON(currentAnnee, currentIndicateur, "arrondissement"),
+    fetchGeoJSON(currentAnnee, currentIndicateur, "quartier"),
+    fetchGeoJSON(currentAnnee, currentIndicateur, "iris"),
+  ]);
+  setSelectionGeoJSONCache("arrondissement", arr);
+  setSelectionGeoJSONCache("quartier", quartier);
+  setSelectionGeoJSONCache("iris", iris);
+  selectionCachesReady = true;
 }
 
 function updateLegend() {
@@ -144,7 +165,8 @@ function init() {
     openSidebar(areaSelection, currentAnnee, getIndicatorScale, selectionLevel);
   });
   setMapLevelSyncHandler((nextLevel) => {
-    if (!nextLevel || nextLevel === currentLevel || !hasLoadedData) return;
+    if (!nextLevel || !hasLoadedData) return;
+    if ((LEVEL_ORDER[nextLevel] ?? -1) <= (LEVEL_ORDER[currentLevel] ?? -1)) return;
     setCurrentLevel(nextLevel);
   });
 
@@ -196,11 +218,21 @@ function init() {
   initAuth(() => {
     if (hasLoadedData) return;
     hasLoadedData = true;
+    let initAttempted = false;
     const waitForMap = setInterval(() => {
+      if (initAttempted) return;
+      initAttempted = true;
       try {
-        setCurrentLevel(currentLevel, { force: true });
+        Promise.resolve(preloadSelectionCaches())
+          .then(() => setCurrentLevel(currentLevel, { force: true }))
+          .then(() => clearInterval(waitForMap))
+          .catch((error) => {
+            console.error("Erreur preloadSelectionCaches", error);
+            clearInterval(waitForMap);
+          });
+      } catch (_) {
         clearInterval(waitForMap);
-      } catch (_) {}
+      }
     }, 500);
   });
 }

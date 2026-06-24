@@ -8,6 +8,22 @@ from api.models import KPIs
 router = APIRouter()
 
 
+def _resolve_available_year(db: Session, table_name: str, requested_year: int | None, fallback_year: int = 2024) -> int:
+    if requested_year is None:
+        row = db.execute(text(f"SELECT MAX(annee) FROM {table_name}")).fetchone()
+        return row[0] if row and row[0] else fallback_year
+
+    row = db.execute(
+        text(f"SELECT MAX(annee) FROM {table_name} WHERE annee <= :annee"),
+        {"annee": requested_year},
+    ).fetchone()
+    if row and row[0]:
+        return row[0]
+
+    row = db.execute(text(f"SELECT MIN(annee) FROM {table_name}")).fetchone()
+    return row[0] if row and row[0] else requested_year
+
+
 def _fetch_kpis(db: Session, arrondissement: int, annee: int) -> dict | None:
     sql = text("""
         SELECT * FROM gold.arrondissement_kpis
@@ -44,9 +60,7 @@ def get_kpis(
     if not (1 <= arrondissement <= 20):
         raise HTTPException(status_code=400, detail="Arrondissement doit être entre 1 et 20")
 
-    if annee is None:
-        row = db.execute(text("SELECT MAX(annee) FROM gold.arrondissement_kpis")).fetchone()
-        annee = row[0] if row and row[0] else 2024
+    annee = _resolve_available_year(db, "gold.arrondissement_kpis", annee)
 
     data = _fetch_kpis(db, arrondissement, annee)
     if not data:
@@ -61,9 +75,7 @@ def get_quartier_kpis(
     annee: int = Query(default=None),
     db: Session = Depends(get_db),
 ):
-    if annee is None:
-        row = db.execute(text("SELECT MAX(annee) FROM gold.quartier_kpis")).fetchone()
-        annee = row[0] if row and row[0] else 2024
+    annee = _resolve_available_year(db, "gold.quartier_kpis", annee)
 
     data = _fetch_quartier_kpis(db, quartier_id, annee)
     if not data:
@@ -78,9 +90,7 @@ def get_iris_kpis(
     annee: int = Query(default=None),
     db: Session = Depends(get_db),
 ):
-    if annee is None:
-        row = db.execute(text("SELECT MAX(annee) FROM gold.iris_kpis")).fetchone()
-        annee = row[0] if row and row[0] else 2024
+    annee = _resolve_available_year(db, "gold.iris_kpis", annee)
 
     data = _fetch_iris_kpis(db, iris_id, annee)
     if not data:

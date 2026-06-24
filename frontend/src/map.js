@@ -7,7 +7,13 @@ let isDark = false;
 let currentGeoJSON = { type: "FeatureCollection", features: [] };
 let currentMarker = null;
 let currentAreaLevel = "quartier";
+let currentSelection = null;
 let mapLevelSyncHandler = null;
+const selectionGeoJSONCache = {
+  arrondissement: null,
+  quartier: null,
+  iris: null,
+};
 let currentScale = {
   min: 0,
   max: 100,
@@ -28,6 +34,75 @@ const STYLES = {
   light: "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json",
   dark:  "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json",
 };
+const SELECTION_COLORS = {
+  arrondissement: "#ffffff",
+  quartier: "#111827",
+  iris: "#f59e0b",
+};
+const SELECTION_FILL_COLORS = {
+  arrondissement: "rgba(255,255,255,0.18)",
+  quartier: "rgba(15,23,42,0.14)",
+  iris: "rgba(245,158,11,0.18)",
+};
+
+function emptyFeatureCollection() {
+  return { type: "FeatureCollection", features: [] };
+}
+
+function oneFeatureCollection(feature) {
+  if (!feature) return emptyFeatureCollection();
+  return { type: "FeatureCollection", features: [feature] };
+}
+
+function setSelectionSourceData(sourceId, feature) {
+  const src = map?.getSource(sourceId);
+  if (!src) return;
+  src.setData(oneFeatureCollection(feature));
+}
+
+function getCachedAreaFeature(level, id) {
+  const cache = selectionGeoJSONCache[level];
+  if (!cache?.features?.length || id == null || id === "") return null;
+
+  const field = level === "arrondissement"
+    ? "arrondissement"
+    : level === "iris"
+      ? "iris_id"
+      : "quartier_id";
+
+  return cache.features.find((feature) => {
+    const props = feature?.properties || {};
+    if (field === "arrondissement") {
+      return Number(props[field]) === Number(id);
+    }
+    return String(props[field] ?? "") === String(id);
+  }) || null;
+}
+
+function getParentFeatures() {
+  if (!currentSelection) {
+    return { arrondissement: null, quartier: null, iris: null };
+  }
+
+  const selectionLevel = currentSelection.level;
+  const arrFeature = selectionLevel === "arrondissement"
+    ? currentSelection.feature
+    : currentSelection.arrondissement != null
+      ? getCachedAreaFeature("arrondissement", currentSelection.arrondissement)
+      : null;
+  const quartierFeature = currentSelection.quartierId
+    ? selectionLevel === "quartier"
+      ? currentSelection.feature
+      : getCachedAreaFeature("quartier", currentSelection.quartierId)
+    : null;
+  const irisFeature = selectionLevel === "iris" ? currentSelection.feature : null;
+
+  return {
+    arrondissement: arrFeature,
+    quartier: quartierFeature,
+    iris: irisFeature,
+  };
+}
 
 function scoreToColor(steps) {
   return ["interpolate", ["linear"], ["get", "__score"]].concat(
@@ -126,24 +201,60 @@ function getLineOpacity(isActive) {
   return isActive ? 0.95 : 0;
 }
 
+function getEmptyFilter(level = currentAreaLevel) {
+  if (level === "arrondissement") return ["==", "arrondissement", -1];
+  if (level === "iris") return ["==", "iris_id", ""];
+  return ["==", "quartier_id", ""];
+}
+
+function applySelectionLayers() {
+  if (!map) return;
+
+  const selectionLevel = currentSelection?.level || null;
+  const parents = getParentFeatures();
+  const hasArrondissement = Boolean(parents.arrondissement);
+  const hasQuartier = Boolean(parents.quartier);
+  const hasIris = Boolean(parents.iris);
+
+  setSelectionSourceData("selection-arr-source", parents.arrondissement);
+  setSelectionSourceData("selection-quartier-source", parents.quartier);
+  setSelectionSourceData("selection-iris-source", parents.iris);
+
+  map.setPaintProperty("selection-arr-border", "line-opacity", hasArrondissement ? 1 : 0);
+  map.setPaintProperty("selection-arr-border", "line-color", SELECTION_COLORS.arrondissement);
+  map.setPaintProperty("selection-arr-border", "line-width", selectionLevel === "arrondissement" ? 6 : 4.8);
+
+  map.setPaintProperty("selection-quartier-border", "line-opacity", hasQuartier && (selectionLevel === "quartier" || selectionLevel === "iris") ? 1 : 0);
+  map.setPaintProperty("selection-quartier-border", "line-color", SELECTION_COLORS.quartier);
+  map.setPaintProperty("selection-quartier-border", "line-width", selectionLevel === "quartier" ? 5 : 4.2);
+
+  map.setPaintProperty("selection-iris-border", "line-opacity", selectionLevel === "iris" && hasIris ? 1 : 0);
+  map.setPaintProperty("selection-iris-border", "line-color", SELECTION_COLORS.iris);
+  map.setPaintProperty("selection-iris-border", "line-width", 4);
+}
+
+function updateSelectionFromFeature(feature) {
+  const props = feature?.properties || {};
+  const areaId = getAreaIdValue(props);
+  if (areaId == null || areaId === "") return;
+
+  currentSelection = {
+    level: currentAreaLevel,
+    areaId,
+    feature,
+    arrondissement: Number.isFinite(Number(props.arrondissement)) ? Number(props.arrondissement) : null,
+    quartierId: typeof props.quartier_id === "string" ? props.quartier_id : null,
+    irisId: typeof props.iris_id === "string" ? props.iris_id : null,
+  };
+  applySelectionLayers();
+}
+
 function setupLayers() {
   if (map.getSource("quartiers")) return;
 
   map.addSource("quartiers", {
     type: "geojson",
     data: currentGeoJSON,
-  });
-
-  // Arrondissement highlight (sous le fill principal)
-  map.addLayer({
-    id: "arrondissement-highlight",
-    type: "fill",
-    source: "quartiers",
-    filter: ["==", "arrondissement", -1],
-    paint: {
-      "fill-color": "#ffffff",
-      "fill-opacity": 0.18,
-    },
   });
 
   map.addLayer({
@@ -167,16 +278,49 @@ function setupLayers() {
     },
   });
 
-  // Bordure arrondissement (ligne épaisse autour des quartiers du même arrondissement)
+  map.addSource("selection-arr-source", {
+    type: "geojson",
+    data: emptyFeatureCollection(),
+  });
+  map.addSource("selection-quartier-source", {
+    type: "geojson",
+    data: emptyFeatureCollection(),
+  });
+  map.addSource("selection-iris-source", {
+    type: "geojson",
+    data: emptyFeatureCollection(),
+  });
+
   map.addLayer({
-    id: "arrondissement-border",
+    id: "selection-arr-border",
     type: "line",
-    source: "quartiers",
-    filter: ["==", "arrondissement", -1],
+    source: "selection-arr-source",
     paint: {
-      "line-color": "#ffffff",
-      "line-width": 2.5,
-      "line-opacity": 0.9,
+      "line-color": SELECTION_COLORS.arrondissement,
+      "line-width": 5.2,
+      "line-opacity": 0,
+    },
+  });
+
+  map.addLayer({
+    id: "selection-quartier-border",
+    type: "line",
+    source: "selection-quartier-source",
+    paint: {
+      "line-color": SELECTION_COLORS.quartier,
+      "line-width": 4.6,
+      "line-opacity": 0,
+    },
+  });
+
+  map.addLayer({
+    id: "selection-iris-border",
+    type: "line",
+    source: "selection-iris-source",
+    paint: {
+      "line-color": SELECTION_COLORS.iris,
+      "line-width": 3.6,
+      "line-opacity": 0,
     },
   });
 
@@ -227,18 +371,6 @@ function setupLayers() {
       "line-opacity": 0,
     },
   });
-
-  map.addLayer({
-    id: "quartiers-selected",
-    type: "line",
-    source: "quartiers",
-    filter: ["==", "quartier_id", ""],
-    paint: {
-      "line-color": "#ffffff",
-      "line-width": 3.2,
-      "line-opacity": 1,
-    },
-  });
 }
 
 function attachEvents(onQuartierClick) {
@@ -282,13 +414,7 @@ function attachEvents(onQuartierClick) {
       arrondissement: props.arrondissement,
     });
 
-    map.setFilter("quartiers-selected", getSelectionFilter(areaId));
-
-    if (props.arrondissement != null) {
-      const arr = Number(props.arrondissement);
-      map.setFilter("arrondissement-highlight", ["==", "arrondissement", arr]);
-      map.setFilter("arrondissement-border",    ["==", "arrondissement", arr]);
-    }
+    updateSelectionFromFeature(e.features[0]);
   });
 }
 
@@ -338,6 +464,7 @@ export function setMapTheme(dark, onReady) {
       const src = map.getSource("quartiers");
       if (src) src.setData(currentGeoJSON);
       applyCurrentScale();
+      applySelectionLayers();
       restoreActivePointLayers();
       onReady?.();
     } else {
@@ -386,6 +513,7 @@ export function updateMapData(geojson, indicateur, indicateurLabel, areaLevel = 
   if (src) src.setData(currentGeoJSON);
   applyCurrentScale();
   clearAreaSelection();
+  restoreActivePointLayers();
 
   return { min: currentScale.min, max: currentScale.max };
 }
@@ -452,13 +580,25 @@ export function clearCompareHighlights() {
 
 export function clearAreaSelection() {
   if (!map) return;
-  map.setFilter("quartiers-selected", getSelectionFilter(null));
-  map.setFilter("arrondissement-highlight", ["==", "arrondissement", -1]);
-  map.setFilter("arrondissement-border", ["==", "arrondissement", -1]);
+  currentSelection = null;
+  setSelectionSourceData("selection-arr-source", null);
+  setSelectionSourceData("selection-quartier-source", null);
+  setSelectionSourceData("selection-iris-source", null);
+  map.setPaintProperty("selection-arr-border", "line-opacity", 0);
+  map.setPaintProperty("selection-quartier-border", "line-opacity", 0);
+  map.setPaintProperty("selection-iris-border", "line-opacity", 0);
 }
 
 export function setMapLevelSyncHandler(handler) {
   mapLevelSyncHandler = handler;
+}
+
+export function setSelectionGeoJSONCache(level, geojson) {
+  if (!level || !(level in selectionGeoJSONCache)) return;
+  selectionGeoJSONCache[level] = geojson || emptyFeatureCollection();
+  if (currentSelection) {
+    applySelectionLayers();
+  }
 }
 
 // ─── Couche de points Silver ──────────────────────────────────────────────────
@@ -501,6 +641,10 @@ async function renderPointLayer(type) {
           "circle-opacity": 0.96,
         },
       });
+    }
+
+    if (map.getLayer(layerId)) {
+      map.moveLayer(layerId);
     }
 
     if (!pointLayerEventsBound.has(layerId)) {
