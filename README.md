@@ -8,152 +8,288 @@ Explorer, comprendre et comparer les dynamiques du logement et de la qualité de
 
 - Guide de démarrage : ce README
 - Logique cartographique détaillée : `docs/carte-detaillee-paris.md`
-- Catalogue des sources de données : `docs/data_catalog.md`
-- Benchmarks de performance pipeline : `docs/performance.md`
-- Décisions d'architecture (ADR) : `docs/architecture_decisions.md`
-- Analyse des écarts vs cahier des charges : `TODO_GAPS.md`
-
----
-
-## Dernières évolutions
-
-- **Revenus médians INSEE Filosofi 2021** : ingestion Bronze (CSV chunked), transformation Silver, agrégation Gold (`revenu_median_uc`) et calcul `taux_effort_achat` = prix_m2 × 50 / revenu médian
-- **Répartition parc immobilier** : comptage T1/T2/T3/T4+ par tranche de surface, donut chart Chart.js dans la sidebar, `surface_mediane`, `nb_appartements`, `nb_maisons`, `pct_appartements`
-- **Couches de points sur la carte** : 6 couches togglables (gares, Vélib, espaces verts, musées, cinémas, bibliothèques) — endpoint `/api/geo/points`, circles MapLibre avec popup hover
-- **Scheduler automatique** : `pipeline/scheduler.py` (APScheduler, cron configurable), service `scheduler` dans `docker-compose.yml`, exécution quotidienne Bronze → Silver → Gold
-- **Data catalog** : `docs/data_catalog.md` — 7 sources documentées avec lignage, champs utilisés et justification
-- **Benchmarks** : `docs/performance.md` — timings par étape, EXPLAIN ANALYZE PostgreSQL, tailles des couches
-- **ADR batch vs streaming** : `docs/architecture_decisions.md` — justification du choix batch, architecture Medallion, REST JWT
-- Carte principale centrée sur les 80 quartiers administratifs
-- Choroplèthe avec échelle dynamique par indicateur, palette inversée pour `prix_m2_median`
-- DVF géolocalisé historique intégré (prix au m² par arrondissement et par quartier)
-- Recherche d'adresse (BAN) avec suppression rapide du pin
-- Comparaison enrichie : arrondissement vs arrondissement, ou quartier vs quartier
-- API sécurisée JWT avec écran de connexion frontend
-- Barres de progression `tqdm` dans les scripts Bronze, Silver et Gold
-- Bronze : récupération complète si `api_max_records` absent, fallback `exports/json` OpenDataSoft
-
----
-
-## Journal de travail
-
-- `2026-06-23` : revenus médians INSEE Filosofi 2021 (GAP 1) — bronze → silver → gold → API → frontend
-- `2026-06-23` : répartition types de logement + donut chart (GAP 2)
-- `2026-06-23` : couches de points togglables sur la carte (GAP 3)
-- `2026-06-23` : scheduler automatique pipeline + service Docker (GAP 4)
-- `2026-06-23` : data catalog, benchmarks, ADR batch/streaming (GAPs 6/8/9)
-- `2026-06-23` : sécurisation API FastAPI avec JWT Bearer, route `POST /api/auth/login`, vérification `GET /api/auth/me`
-- `2026-06-23` : connexion frontend JWT avec stockage local du token et rechargement après authentification
-- `2026-06-23` : ajout barres de progression `tqdm` dans les 3 scripts pipeline
-- `2026-06-23` : correction Bronze — `api_max_records` absent = tout récupérer (plus de fallback à `500`)
-- `2026-06-23` : fallback Bronze via `exports/json` pour datasets OpenDataSoft > 10 000 lignes
+- Catalogue des 30 sources de données : `docs/data_catalog.md`
+- Rapport de performance pipeline : `docs/perf_report.md`
 
 ---
 
 ## Architecture
 
 ```
-APIs / fichiers locaux (CSV, GeoJSON, Parquet)
-              ↓  bronze_feeder.py
-  [Bronze — MinIO Parquet]         ← copie brute immuable, partitionnée par ingestion_date
-              ↓  silver_transformer.py
-  [Silver — MongoDB]               ← nettoyage, typage, géocodage WGS84, spatialisation quartier
-              ↓  gold_aggregator.py
-  [Gold — PostgreSQL / PostGIS]    ← KPIs agrégés par quartier × année, géométries polygones
-              ↓  FastAPI (JWT)
-  [API REST]                       ← /api/geo, /api/kpis, /api/timeline, /api/compare, /api/geo/points
-              ↓  MapLibre GL JS + Chart.js
-  [Dashboard web interactif]       ← choroplèthe + points + timeline + comparaison + géocodage BAN
+─── PIPELINE BATCH (nocturne, idempotent) ──────────────────────────────────────────
+scheduler.py (APScheduler, 2h chaque nuit)
+    ↓  bronze_feeder.py          (skip si déjà ingéré aujourd'hui)
+  [Bronze — MinIO Parquet]       ← copie brute immuable, partition ingestion_date/
+    ↓  silver_transformer.py     (skip si déjà transformé aujourd'hui)
+  [Silver — MinIO Parquet]       ← clean.parquet enrichi WGS84 + IRIS/quartier (geopandas)
+    ↓  gold_aggregator.py
+  [Gold — Phase 1]  MinIO Silver → MongoDB gold   ← documents complets par collection
+  [Gold — Phase 2]  MongoDB gold → PostgreSQL      ← KPIs agrégés × arrondissement/quartier/IRIS × année
+
+─── PIPELINE STREAMING (near real-time, toutes les 5 min) ──────────────────────────
+APIs volatiles — Vélib · Sanisettes · Chantiers · Anomalies · Voies (100 000 derniers enregistrements)
+              ↓  kafka_producer.py  (fetch + publish)
+  [Kafka — topics urban.*]       ← broker KRaft, rétention 24h, 5 partitions
+              ↓  kafka_consumer.py  (upsert en continu)
+  [Gold — MongoDB]               ← collections velib/sanisettes/chantiers/anomalies/voies en temps réel
+
+─── API & FRONTEND ──────────────────────────────────────────────────────────────────
+  [FastAPI (JWT)]                ← /api/geo, /api/kpis (fallback année/section), /api/streaming/status …
+              ↓
+  [Dashboard MapLibre + Chart.js] ← badges année données · countdown Kafka · timeline · comparaison
 ```
 
-Le pipeline est exécuté automatiquement chaque nuit via le scheduler APScheduler (service `scheduler` Docker).  
-Pour le détail des choix batch vs streaming et l'architecture Medallion : `docs/architecture_decisions.md`.
+**Deux modes de mise à jour coexistent :**
+- **Batch** : DVF, Filosofi INSEE, espaces verts, écoles… (25 datasets) — pipeline nocturne idempotent.
+- **Streaming** : Vélib, Sanisettes, Chantiers, Anomalies, Voies (5 datasets) — Kafka producer/consumer toutes les 5 min, 100 000 derniers enregistrements, upsert MongoDB gold.
 
 ### Pourquoi cette stack ?
 
 | Technologie | Type | Rôle |
-|-------------|------|------|
-| **MinIO** | Object Store (S3) | Bronze immuable — Parquet columnar, versioning par partition |
-| **MongoDB** | Document Store NoSQL | Silver flexible, index `2dsphere` pour requêtes géospatiales |
-| **PostgreSQL + PostGIS** | SQL Relationnel | Gold tabulaire, KPIs typés, jointures géométriques |
-| **APScheduler** | Scheduler Python | Exécution cron quotidienne Bronze → Silver → Gold |
+|---|---|---|
+| **MinIO** | Object Store (S3) | Bronze (raw Parquet) + Silver (clean Parquet) — immuable, partitionné par date |
+| **MongoDB** | Document Store NoSQL | Gold documents — collections complètes, index `2dsphere`, cible des upserts Kafka |
+| **PostgreSQL + PostGIS** | SQL Relationnel | Gold KPIs — agrégats typés par arrondissement/quartier/IRIS × année |
+| **Apache Kafka** | Broker de streaming | KRaft (sans Zookeeper), rétention 24h, topics `urban.*` par dataset |
+| **APScheduler** | Scheduler Python | Cron nocturne pour le pipeline batch (DVF, Filosofi…) |
+| **FastAPI** | API REST | Performance, docs auto, dual DB (PostgreSQL + MongoDB) |
+| **python-jose** | Auth JWT | Stateless, algorithme HS256 fixé, compatible multi-instance |
+| **tenacity** | Retry HTTP | Backoff exponentiel sur tous les appels API réseau |
+| **MapLibre GL JS** | Carte | Open-source, choroplèthe + cercles natifs |
+| **Chart.js** | Graphiques | Donut, radar, ligne — léger |
 
 ---
 
-## Démarrage rapide
+## Lancement complet
 
-### 1. Prérequis
+> Suivre les étapes dans l'ordre. Prévoir ~20 minutes pour le premier pipeline complet (dépend du réseau).
 
-- Docker + Docker Compose
-- Python 3.11+
-- Node.js 18+ (frontend)
+### Prérequis
 
-### 2. Configuration
+| Outil | Version minimale | Vérification |
+|---|---|---|
+| Docker + Docker Compose | 24+ / 2.20+ | `docker compose version` |
+| Python | 3.11+ | `python --version` |
+| Node.js | 18+ | `node --version` |
+
+---
+
+### Étape 1 — Configurer l'environnement
 
 ```bash
 cp .env.example .env
-# Adapter les mots de passe et le secret JWT si nécessaire
 ```
 
-Variables d'environnement clés :
+**Générer le hash du mot de passe API** (obligatoire — l'API refuse de démarrer sans ça) :
+
+```bash
+python -c "
+import hashlib, os
+s = os.urandom(16).hex()
+h = hashlib.pbkdf2_hmac('sha256', b'VOTRE_MOT_DE_PASSE', s.encode(), 260000).hex()
+print(f'API_AUTH_PASSWORD_HASH=pbkdf2_sha256\$260000\${s}\${h}')
+"
+# Copier la ligne entière dans .env
+```
+
+Éditer `.env` et vérifier ces variables :
 
 ```env
+# Auth API
 API_AUTH_USER=admin
-API_AUTH_PASSWORD=change-me
-API_JWT_SECRET=change-me-dev-jwt-secret
+API_AUTH_PASSWORD_HASH=pbkdf2_sha256$260000$<salt>$<hash>   # généré ci-dessus
+API_JWT_SECRET=remplacer-par-une-valeur-aleatoire-longue
 API_JWT_EXPIRE_MINUTES=120
 API_CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
 
-# Scheduler (optionnel, défaut : 2 h chaque nuit)
+# Infrastructure (laisser les valeurs par défaut pour Docker)
+MINIO_ACCESS_KEY=admin
+MINIO_SECRET_KEY=password123
+POSTGRES_DB=urban_data
+POSTGRES_USER=admin
+POSTGRES_PASSWORD=password123
+
+# Scheduler batch (optionnel)
 PIPELINE_CRON=0 2 * * *
 PIPELINE_RUN_ON_START=false
 ```
 
-### 3. Infrastructure
+---
+
+### Étape 2 — Lancer l'infrastructure
 
 ```bash
 docker-compose up -d
-# Lance : MinIO, MongoDB, PostgreSQL, API FastAPI, Scheduler automatique
 ```
 
-### 4. Pipeline manuel (premier lancement ou rejeu)
+Vérifier que tous les services sont `healthy` :
+
+```bash
+docker-compose ps
+# Attendre que minio, mongodb, postgres soient en "healthy" avant de continuer
+# (environ 30 secondes au premier démarrage)
+```
+
+Services lancés :
+
+| Service | Port | Description |
+|---|---|---|
+| MinIO | `9000` (API S3) · `9001` (console web) | Data lake Bronze + Silver (Parquet) |
+| MongoDB | `27017` | Gold documents (collections complètes + upserts Kafka) |
+| PostgreSQL | `5433` | Gold KPIs (5433 pour éviter les conflits locaux) |
+| API FastAPI | `8000` | REST API |
+| Scheduler | — | Pipeline batch nocturne (APScheduler) |
+| Kafka | `9092` | Broker KRaft — streaming 5 datasets |
+| kafka-producer | — | Fetch 100k enregistrements/5 min par dataset |
+| kafka-consumer | — | Upsert MongoDB gold en continu |
+
+---
+
+### Étape 3 — Installer les dépendances Python
 
 ```bash
 pip install -r requirements.txt
+```
 
-# 1. Init schéma Gold
+---
+
+### Étape 4 — Initialiser le schéma PostgreSQL (Gold)
+
+À faire **une seule fois** au premier lancement (ou après un `docker-compose down -v`) :
+
+```bash
 python pipeline/init_db.py
+# Crée les tables gold.*, les index GIST et btree, active PostGIS
+```
 
-# 2. Ingestion Bronze → MinIO
+---
+
+### Étape 5 — Lancer le pipeline batch (Bronze → Silver → Gold)
+
+```bash
+# Bronze : ingestion 25 sources batch → MinIO bronze/ (8–15 min selon réseau)
+# Skip automatique si la partition du jour existe déjà (idempotent)
 python pipeline/bronze_feeder.py
 
-# 3. Transformation Silver → MongoDB
+# Silver : transformation + PIP vectorisé geopandas → MinIO silver/ (3–5 min)
+# Skip automatique si clean.parquet du jour existe déjà (idempotent)
+set SILVER_WORKERS=10  # optionnel, parallélisme (défaut 5)
 python pipeline/silver_transformer.py
 
-# 4. Agrégation Gold → PostgreSQL
+# Gold Phase 1 : Silver Parquet → MongoDB gold (documents complets, upsert)
+# Gold Phase 2 : MongoDB gold → PostgreSQL (KPIs agrégés par zone × année)
 python pipeline/gold_aggregator.py
 ```
 
-> Le scheduler Docker reprend ensuite automatiquement chaque nuit.  
-> Pour forcer une exécution immédiate via Docker : `PIPELINE_RUN_ON_START=true docker-compose up scheduler`
+> Bronze et Silver affichent des barres `tqdm`. En cas d'API source indisponible, le dataset est ignoré.  
+> Le scheduler Docker relance automatiquement le pipeline chaque nuit à 2h.  
+> Les 5 datasets Kafka (Vélib, Sanisettes, Chantiers, Anomalies, Voies) ne passent **pas** par Bronze/Silver batch.
 
-### 5. API
+---
+
+### Étape 6 — Vérifier le streaming Kafka (si activé)
 
 ```bash
-uvicorn api.main:app --reload --port 8000
-# Docs interactives : http://localhost:8000/docs
+# Voir les logs du producer — doit afficher des messages toutes les 5 min
+docker-compose logs -f kafka-producer
+
+# Sortie attendue (100 000 derniers enregistrements par dataset) :
+# ✓ velib      — 100 000 messages → topic urban.velib
+# ✓ sanisettes — 100 000 messages → topic urban.sanisettes
+# ✓ chantiers  — 100 000 messages → topic urban.chantiers
+# ✓ anomalies  — 100 000 messages → topic urban.anomalies
+# ✓ voies      — 100 000 messages → topic urban.voies
+
+# Voir les logs du consumer — upserts MongoDB gold
+docker-compose logs -f kafka-consumer
+# ✓ velib      — N upserts dans gold.velib
+# ✓ voies      — N upserts dans gold.voies
 ```
 
-Le port PostgreSQL est `5433` dans `docker-compose.yml` pour éviter les conflits avec un PostgreSQL local sur `5432`.
+---
 
-### 6. Frontend
+### Étape 7 — Lancer le frontend
 
 ```bash
 cd frontend
 npm install
 npm run dev
-# Dashboard : http://localhost:5173
+# Dashboard disponible : http://localhost:5173
 ```
+
+---
+
+### Récapitulatif des URLs
+
+| Service | URL | Identifiants |
+|---|---|---|
+| **Dashboard** | http://localhost:5173 | login via l'écran d'auth |
+| **API REST** | http://localhost:8000 | — |
+| **Swagger UI** | http://localhost:8000/docs | — |
+| **MinIO console** | http://localhost:9001 | `admin` / `password123` |
+
+---
+
+### Tests
+
+```bash
+pytest tests/ -v
+```
+
+| Fichier | Couverture |
+|---|---|
+| `tests/test_pipeline.py` | 20 tests — `parse_arrondissement`, `transform_dvf` (prix/m², surface zéro, années), `transform_revenus` |
+| `tests/test_api.py` | 8 tests — health, login, JWT, protection endpoints, structure GeoJSON, structure KPI |
+
+> Les tests API nécessitent une connexion PostgreSQL et MongoDB. En CI sans Docker, mocker `api.database` et `api.mongo`.
+
+---
+
+### Migration vers Kafka (si le projet tournait sans Kafka)
+
+Si vous avez déjà le stack de base qui tourne et vous ajoutez Kafka :
+
+```bash
+# 1. Arrêter les services existants
+docker-compose down
+
+# 2. Installer la dépendance Python Kafka
+pip install -r requirements.txt
+# kafka-python-ng est déjà dans requirements.txt
+
+# 3. Relancer (Kafka est maintenant dans docker-compose.yml)
+docker-compose up -d
+
+# 4. Vérifier que Kafka est healthy
+docker-compose ps kafka
+# Status doit être "healthy" (peut prendre 30-60 secondes)
+
+# 5. Vérifier les topics créés automatiquement
+docker-compose exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list
+# urban.velib
+# urban.sanisettes
+# urban.chantiers
+# urban.anomalies
+```
+
+**Ce qui change avec Kafka :**
+- Vélib, Sanisettes, Chantiers, Anomalies ne passent **plus** par le pipeline batch Bronze/Silver pour ces 4 datasets — ils sont maintenant mis à jour directement via Kafka toutes les 5 minutes.
+- Les données dans MongoDB Silver pour ces collections sont désormais beaucoup plus fraîches (5 min vs 24h).
+- L'API sert les mêmes endpoints — aucun changement côté frontend.
+- Si Kafka est arrêté, le pipeline batch reprend le relais au prochain run nocturne.
+
+---
+
+## Résilience et tolérance aux pannes
+
+| Mécanisme | Implémentation | Effet |
+|---|---|---|
+| **Ingestion idempotente** | `head_object` MinIO au début de Bronze et Silver — skip si la partition du jour existe | Relancer le pipeline ne ré-ingère ni ne ré-transforme ce qui est déjà fait |
+| **Retry HTTP tenacity** | `_http_get_with_retry()` dans `bronze_feeder.py` — 3 tentatives, backoff exponentiel 2s→10s | Une source API indisponible est retenté 3 fois puis ignorée ; le pipeline continue |
+| **Healthchecks Docker** | `healthcheck` sur MinIO, MongoDB, PostgreSQL dans `docker-compose.yml` | L'API et le scheduler ne démarrent qu'après que les services de données sont prêts |
+| **Restart policies** | `restart: on-failure` (API), `restart: unless-stopped` (scheduler) | Redémarrage automatique en cas d'erreur inattendue |
+| **Silver immuable (Parquet)** | Silver = fichiers Parquet MinIO, Gold lit le Silver déjà persisté | Une interruption pendant Gold ne perd pas les données transformées |
+| **Kafka consumer restart** | `restart: unless-stopped` sur le consumer Docker | Si le consumer crash, il redémarre et reprend depuis le dernier offset commité — aucun message perdu |
 
 ---
 
@@ -162,80 +298,82 @@ npm run dev
 ### Formats d'ingestion (variété RNCP)
 
 | Format | Exemple | Loader |
-|--------|---------|--------|
+|---|---|---|
 | Parquet local | arbres, espaces verts | `pd.read_parquet()` |
 | CSV local (auto-sep) | fibre, base_imb | `_detect_sep()` + `pd.read_csv()` |
 | CSV SDMXmeta | INSEE Filosofi 2021 | `pd.read_csv()` chunked + filtre ARM |
 | JSON local | qualité de l'air | `json.load()` + `pd.json_normalize()` |
-| API REST paginée (OpenDataSoft) | sanisettes, chantiers | `fetch_api()` |
-| API REST paginée (IDF / transport) | cinémas, musées, gares | `fetch_api_generic()` |
-| GeoJSON (FeatureCollection) | arrondissements | `requests.get()` + parsing |
+| API REST paginée (OpenDataSoft) | sanisettes, chantiers, anomalies | `_http_get_with_retry()` + export streaming |
+| API REST paginée (IDF / transport) | cinémas, musées, gares, bus | `_http_get_with_retry()` |
+| API DVF+ Etalab | DVF prix/m² 2021–2025 | pagination sur années |
 
-### Datasets par indicateur
+### Datasets par indicateur (25 batch + 5 streaming = 30 sources)
 
-#### Indicateur 1 — Qualité de vie
+#### Indicateur 1 — Qualité de vie (8 batch + 3 streaming)
+| Dataset | Source | Format | Mode |
+|---|---|---|---|
+| Îlots de fraîcheur — espaces verts | Paris Open Data | Parquet local | Batch |
+| Îlots de fraîcheur — équipements | Paris Open Data | Parquet local | Batch |
+| Arbres de Paris | Paris Open Data | Parquet local | Batch |
+| Qualité de l'air NO2/PM2.5/PM10/O3 | data.gouv.fr | JSON local | Batch |
+| Fibre — déploiement actuel (75) | data.gouv.fr | CSV local | Batch |
+| Fibre — base immeubles Paris 75 | data.gouv.fr | CSV local | Batch |
+| Fibre — base immeubles coaxiale | data.gouv.fr | CSV local | Batch |
+| Fibre — débit filaire par département | data.gouv.fr | CSV local | Batch |
+| Sanisettes publiques | Paris Open Data | Kafka streaming | **Streaming** |
+| Chantiers à Paris | Paris Open Data | Kafka streaming | **Streaming** |
+| Anomalies (Dans ma rue) | Paris Open Data | Kafka streaming | **Streaming** |
+
+#### Indicateur 2 — Transports (2 batch + 2 streaming)
+| Dataset | Source | Format | Mode |
+|---|---|---|---|
+| Gares de voyageurs IDF | IDF Mobilités | API paginée | Batch |
+| Arrêts de bus IDF | IDF Mobilités | API paginée | Batch |
+| Vélib — stations disponibilité | Paris Open Data | Kafka streaming | **Streaming** |
+| Comptages multimodaux (Voies) | Paris Open Data | Kafka streaming | **Streaming** |
+
+#### Indicateur 3 — Loisirs (4 datasets)
 | Dataset | Source | Format |
-|---------|--------|--------|
-| Îlots de fraîcheur — espaces verts | parisdata | Parquet local |
-| Îlots de fraîcheur — équipements | parisdata | Parquet local |
-| Arbres de Paris | parisdata | Parquet local |
-| Qualité de l'air NO2/PM2.5 (Airparif) | datagouv | JSON local |
-| Fibre — déploiement actuel (75) | datagouv | CSV local |
-| Fibre — base immeubles / coaxiale / débit | datagouv | CSV local |
-| Sanisettes publiques | parisdata | API |
-| Chantiers à Paris | parisdata | API |
-| Anomalies (Dans ma rue) | parisdata | API |
+|---|---|---|
+| Que faire à Paris — événements | Paris Open Data | API paginée |
+| Terrasses autorisées | Paris Open Data | API paginée |
+| Salles de cinéma IDF | IDF Open Data | API paginée |
+| Musées IDF | IDF Open Data | API paginée |
 
-#### Indicateur 2 — Transports
+#### Indicateur 4 — Services publics (6 datasets)
 | Dataset | Source | Format |
-|---------|--------|--------|
-| Comptages multimodaux permanents | parisdata | API |
-| Vélib — stations disponibilité | parisdata | API |
-| Gares de voyageurs IDF | idfm | API |
-| Arrêts de bus IDF | idfm | API |
+|---|---|---|
+| Écoles élémentaires Paris | Paris Open Data | API paginée |
+| Secteurs scolaires maternelles | Paris Open Data | API paginée |
+| Secteurs scolaires collèges | Paris Open Data | API paginée |
+| Bibliothèques — postes publics | Paris Open Data | API paginée |
+| Enseignement supérieur IDF | IDF Open Data | API paginée |
+| Bureaux de poste IDF | IDF Open Data | API paginée |
 
-#### Indicateur 3 — Loisirs
+#### Immobilier (3 datasets)
 | Dataset | Source | Format |
-|---------|--------|--------|
-| Que faire à Paris — événements | parisdata | API |
-| Terrasses autorisées | parisdata | API |
-| Salles de cinéma IDF | data.iledefrance.fr | API |
-| Musées IDF | data.iledefrance.fr | API |
+|---|---|---|
+| Revenus médians INSEE Filosofi 2021 | data.gouv.fr / INSEE | CSV SDMXmeta |
+| Logements sociaux financés Paris | Paris Open Data | API paginée |
+| DVF+ prix/m² Paris 2021–2025 | data.gouv.fr / Etalab | API DVF+ annuelle |
 
-#### Indicateur 4 — Services publics
-| Dataset | Source | Format |
-|---------|--------|--------|
-| Écoles élémentaires Paris | parisdata | API |
-| Secteurs scolaires maternelles | parisdata | API |
-| Secteurs scolaires collèges | parisdata | API |
-| Bibliothèques — postes publics | parisdata | API |
-| Enseignement supérieur IDF | data.iledefrance.fr | API |
-| Bureaux de poste IDF | data.iledefrance.fr | API |
-
-#### Immobilier
-| Dataset | Source | Format |
-|---------|--------|--------|
-| Logements sociaux financés Paris | parisdata | API |
-| DVF géolocalisées Paris (2014–2025) | data.gouv.fr / Etalab | CSV.gz annuel |
-| **Revenus médians INSEE Filosofi 2021** | data.gouv.fr / INSEE | CSV SDMXmeta |
+Pour le détail complet (qualité, colonnes clés, limites) : `docs/data_catalog.md`
 
 ---
 
 ## KPIs calculés
 
-### Nouveaux indicateurs immobiliers (v1.1+)
+### Indicateurs immobiliers
 
 | KPI | Formule | Couche |
-|-----|---------|--------|
+|---|---|---|
+| `prix_m2_median` | médiane `valeur_fonciere / surface_reelle_bati` DVF | Gold |
 | `revenu_median_uc` | `OBS_VALUE` Filosofi `MED_SL` (EUR/an) | Silver → Gold |
 | `taux_effort_achat` | `prix_m2_median × 50 / revenu_median_uc` (années de revenu) | Gold |
 | `surface_mediane` | médiane `surface_reelle_bati` DVF (m²) | Gold |
 | `nb_appartements` / `nb_maisons` | comptage par `type_local` DVF | Gold |
 | `pct_appartements` | `nb_appartements / (nb_appartements + nb_maisons) × 100` | Gold |
-| `nb_t1` | transactions DVF avec surface ≤ 25 m² | Gold |
-| `nb_t2` | 26–45 m² | Gold |
-| `nb_t3` | 46–65 m² | Gold |
-| `nb_t4plus` | ≥ 66 m² | Gold |
+| `nb_t1` / `nb_t2` / `nb_t3` / `nb_t4plus` | tranches de surface DVF (≤25 / 26–45 / 46–65 / ≥66 m²) | Gold |
 
 ### 4 scores composites (0–100)
 
@@ -255,43 +393,40 @@ npm run dev
 
 ## API REST
 
-| Méthode | Route | Description |
-|---------|-------|-------------|
-| GET | `/` | Accueil API |
-| POST | `/api/auth/login` | Authentification → JWT |
-| GET | `/api/auth/me` | Vérification token |
-| GET | `/api/geo/arrondissements` | GeoJSON 20 arrondissements + KPIs |
-| GET | `/api/geo/quartiers` | GeoJSON 80 quartiers + KPIs |
-| **GET** | **`/api/geo/points?type=`** | **GeoJSON points Silver (gares\|velib\|espaces_verts\|musees\|cinemas\|bibliotheques)** |
-| GET | `/api/kpis/{1-20}` | KPIs arrondissement |
-| GET | `/api/kpis/quartier/{id}` | KPIs quartier |
-| GET | `/api/timeline/{1-20}` | Évolution temporelle arrondissement |
-| GET | `/api/timeline/quartier/{id}` | Évolution temporelle quartier |
-| GET | `/api/compare?arr1=X&arr2=Y` | Comparaison côte à côte |
-| GET | `/api/health` | Santé API |
+| Méthode | Route | Auth | Description |
+|---|---|---|---|
+| GET | `/` | — | Accueil API |
+| GET | `/api/health` | — | Santé API |
+| POST | `/api/auth/login` | — | Authentification → JWT |
+| GET | `/api/auth/me` | JWT | Vérification token |
+| GET | `/api/geo/arrondissements?annee=&indicateur=` | JWT | GeoJSON 20 arrondissements + KPIs |
+| GET | `/api/geo/quartiers?annee=&indicateur=` | JWT | GeoJSON 80 quartiers + KPIs |
+| GET | `/api/geo/iris?annee=&indicateur=` | JWT | GeoJSON ~1000 IRIS + KPIs |
+| GET | `/api/geo/points?type=` | JWT | GeoJSON points Silver (gares\|velib\|espaces_verts\|musees\|cinemas\|bibliotheques) |
+| GET | `/api/kpis/{1-20}?annee=` | JWT | KPIs arrondissement (fallback année par section si NULL) |
+| GET | `/api/kpis/quartier/{id}?annee=` | JWT | KPIs quartier |
+| GET | `/api/kpis/iris/{id}?annee=` | JWT | KPIs IRIS |
+| GET | `/api/timeline/{1-20}` | JWT | Évolution temporelle arrondissement |
+| GET | `/api/timeline/quartier/{id}` | JWT | Évolution temporelle quartier |
+| GET | `/api/compare?arr1=X&arr2=Y` | JWT | Comparaison côte à côte |
+| GET | `/api/streaming/status` | JWT | Dernière mise à jour Kafka + intervalle refresh |
 
-Toutes les routes métier exigent `Authorization: Bearer <jwt>`.  
-Routes publiques : `/`, `/api/auth/login`, `/api/health`, `/favicon.ico`.
+**Note pagination :** Les endpoints GeoJSON (`/geo/arrondissements`, `/geo/quartiers`, `/geo/iris`) renvoient le jeu complet intentionnellement. MapLibre charge une seule fois la géométrie en mémoire client pour un rendu choroplèthe fluide. Charge réseau estimée : ~150 KB gzippé pour les quartiers, ~800 KB pour les IRIS.
 
 Docs Swagger : `http://localhost:8000/docs`
 
 ---
 
-## Stack technologique
+## Tests
 
-| Couche | Technologie | Justification |
-|--------|-------------|---------------|
-| Ingestion | Python + pandas + boto3 | Multi-formats, upload S3 |
-| Bronze | MinIO (S3) + Parquet | Stockage immuable, columnar, partitionné |
-| Silver | MongoDB 7 + PyMongo | Schéma flexible, index `2dsphere` |
-| Gold | PostgreSQL 16 + PostGIS | KPIs tabulaires, jointures géospatiales |
-| Scheduler | APScheduler | Cron Python natif, aucune dépendance externe |
-| API | FastAPI + SQLAlchemy + PyMongo | Performance, docs auto, dual DB |
-| Auth | JWT (python-jose) | Stateless, compatible multi-instance |
-| Carte | MapLibre GL JS | Open-source, choroplèthe + cercles natifs |
-| Graphiques | Chart.js | Donut, radar, ligne — léger |
-| Géocodage | API BAN (data.gouv.fr) | Gratuit, officiel France |
-| Build frontend | Vite | Rapide, proxy API intégré |
+```bash
+pytest tests/ -v
+```
+
+| Fichier | Couverture |
+|---|---|
+| `tests/test_pipeline.py` | 20 tests — `parse_arrondissement`, `transform_dvf` (prix/m², années, surface zéro), `transform_revenus` (filtrage, normalisation) |
+| `tests/test_api.py` | 8 tests — health check, login, rejet mot de passe incorrect, protection JWT, structure GeoJSON, structure KPI |
 
 ---
 
@@ -300,37 +435,42 @@ Docs Swagger : `http://localhost:8000/docs`
 ```
 .
 ├── pipeline/
-│   ├── bronze_feeder.py       # Ingestion → MinIO bronze (25+ sources)
-│   ├── silver_transformer.py  # Nettoyage → MongoDB silver
-│   ├── gold_aggregator.py     # Agrégation KPIs → PostgreSQL
-│   ├── init_db.py             # DDL PostgreSQL (CREATE TABLE + migrations)
-│   └── scheduler.py           # Scheduler APScheduler (cron Bronze→Silver→Gold)
+│   ├── bronze_feeder.py       # Ingestion 25 sources → MinIO bronze (idempotent, retry tenacity)
+│   ├── silver_transformer.py  # Nettoyage → MinIO silver Parquet (idempotent, geopandas PIP)
+│   ├── gold_aggregator.py     # Phase 1 : Silver → MongoDB gold | Phase 2 : MongoDB → PostgreSQL
+│   ├── init_db.py             # DDL PostgreSQL (CREATE TABLE + index GIST + migrations)
+│   ├── scheduler.py           # Scheduler APScheduler — pipeline batch nocturne
+│   ├── kafka_producer.py      # Producer Kafka — 5 datasets × 100k enregistrements/5 min
+│   ├── kafka_consumer.py      # Consumer Kafka — upsert MongoDB gold en continu
+│   └── config.py              # Variables de connexion (MinIO, MongoDB, PostgreSQL)
 ├── api/
 │   ├── main.py                # FastAPI app
 │   ├── database.py            # SQLAlchemy engine (PostgreSQL)
-│   ├── mongo.py               # Client MongoDB (Silver read)
-│   ├── models.py              # Schémas Pydantic (KPIs, GeoFeature, Timeline…)
-│   ├── security.py            # JWT, Bearer, auth .env
-│   └── routers/               # auth, geo (+ /points), kpis, timeline, compare
+│   ├── mongo.py               # Client MongoDB gold (read)
+│   ├── models.py              # Schémas Pydantic (KPIs + annee_* par section, GeoFeature…)
+│   ├── security.py            # JWT python-jose, PBKDF2, Bearer
+│   └── routers/               # auth, geo, kpis (fallback année), timeline, compare, streaming
+├── tests/
+│   ├── test_pipeline.py       # Tests unitaires pipeline (20 tests)
+│   └── test_api.py            # Tests intégration API (8 tests)
 ├── frontend/
-│   ├── index.html             # Contrôles carte (indicateur, année, points, comparaison)
+│   ├── index.html
 │   └── src/
-│       ├── main.js            # Orchestration, toggles couches de points
-│       ├── map.js             # MapLibre : choroplèthe, highlight, togglePointLayer()
-│       ├── sidebar.js         # KPIs, donut surfaces, timeline chart
-│       ├── compare.js         # Radar comparaison
-│       ├── geocode.js         # Recherche BAN
+│       ├── main.js
+│       ├── map.js
+│       ├── sidebar.js
+│       ├── compare.js
+│       ├── geocode.js
 │       └── style.css
 ├── docs/
 │   ├── carte-detaillee-paris.md
-│   ├── data_catalog.md        # Catalogue sources (lignage, licence, justification)
-│   ├── performance.md         # Benchmarks pipeline + EXPLAIN ANALYZE
-│   └── architecture_decisions.md  # ADR batch/streaming, Medallion, REST JWT
+│   ├── data_catalog.md        # Catalogue 30 datasets (source, qualité, colonnes clés)
+│   └── perf_report.md         # Benchmarks pipeline + optimisations documentées
+├── docker-compose.yml         # MinIO + MongoDB + PostgreSQL + API + Scheduler batch
 ├── Dockerfile.api
 ├── Dockerfile.scheduler
-├── docker-compose.yml
 ├── requirements.txt
-├── TODO_GAPS.md               # Analyse des écarts vs cahier des charges
+├── pytest.ini
 └── .env.example
 ```
 
@@ -342,7 +482,7 @@ Docs Swagger : `http://localhost:8000/docs`
 **Fond de carte** : tuiles vectorielles CartoDB Positron / Dark Matter  
 **Choroplèthe** : échelle dynamique calculée sur les valeurs réelles de chaque indicateur
 
-**Couches de points Silver** (togglables via les checkboxes) :
+**Couches de points Silver** (togglables) :
 - Gares IDFM (jaune)
 - Stations Vélib (bleu)
 - Espaces verts (vert)
@@ -359,27 +499,30 @@ Pour la logique détaillée : `docs/carte-detaillee-paris.md`
 ## Versioning
 
 | Tag | Contenu |
-|-----|---------|
+|---|---|
 | `v0.1.0` | Bronze + Silver initiaux (15 datasets) |
 | `v0.2.0` | Bronze + Silver étendus (27 datasets, 4 indicateurs) + Gold + API + Frontend |
 | `v0.3.0` | JWT auth, tqdm, corrections Bronze (max_records, fallback exports/json) |
-| **`v0.4.0`** | **Revenus INSEE Filosofi, types logement, points carte, scheduler, docs** *(à venir)* |
+| `v0.4.0` | Revenus INSEE Filosofi, types logement, points carte, scheduler, docs |
+| `v0.5.0` | Kafka streaming (vélib/sanisettes/chantiers/anomalies), PBKDF2 sécurité, tests API, data catalog, perf report |
+| `v0.6.0` | Architecture médaillon stricte : Silver = MinIO Parquet only → MongoDB déplacé en Gold (Phase 1 silver→mongo, Phase 2 mongo→postgres). Kafka étendu à 5 datasets + Voies 100k. Ingestion idempotente Bronze + Silver. PIP vectorisé geopandas.sjoin (20–50× plus rapide). |
+| **`v0.7.0`** | **Badges année par section (fallback API si NULL) + countdown temps réel Kafka dans le dashboard. Endpoint `/api/streaming/status`.** |
 
 ---
 
 ## Conformité RNCP40875 Bloc 1
 
 | Compétence | Implémentation |
-|-----------|----------------|
-| C1.1 — Collecter données multi-sources, multi-formats | 28 datasets : Parquet, CSV, CSV SDMXmeta (Filosofi), JSON, API REST, GeoJSON |
-| C1.2 — Stocker en format optimisé | Parquet columnar (Bronze MinIO) + documents MongoDB (Silver) |
-| C1.3 — Nettoyer, normaliser, géocoder | WKB→GeoJSON, Lambert93→WGS84, filtrage ARM codes INSEE, géocodage BAN |
-| C1.4 — Architecture en zones (Medallion) | Bronze (brut) → Silver (enrichi) → Gold (agrégé) |
-| C2.1 — Versioning & traçabilité | Partition `ingestion_date=`, `_ingested_at`, `_meta.json`, tags git |
-| C2.2 — Bases NoSQL | MongoDB Silver (document store, index `2dsphere`) |
-| C2.3 — Bases SQL | PostgreSQL + PostGIS Gold (ST_Within, ST_AsGeoJSON) |
-| C2.4 — Automatisation pipeline | Scheduler APScheduler cron + service Docker `scheduler` |
-| C2.5 — API performante et filtrable | FastAPI + SQLAlchemy, `?annee=`, `?indicateur=`, `?type=`, JWT |
-| C2.6 — Dashboard cartographique interactif | MapLibre choroplèthe + points Silver + slider + comparaison + géocodage |
-| C2.7 — Dataviz accessible | ARIA labels, Chart.js donut/radar/ligne, contraste couleurs |
-| C2.8 — Indicateurs composites originaux | Qualité vie / Transports / Loisirs / Services + taux_effort_achat |
+|---|---|
+| C1.1 — Collecter données multi-sources, multi-formats | 30 datasets : Parquet, CSV, CSV SDMXmeta, JSON, API REST paginées, export streaming |
+| C1.2 — Stocker en format optimisé | Parquet columnar (Bronze MinIO) + documents MongoDB (Silver) + PostgreSQL/PostGIS (Gold) |
+| C1.3 — Data Lake sécurisé avec catalog | MinIO bucket `bronze` + `docs/data_catalog.md` (30 datasets documentés, qualité, sources) |
+| C1.4 — Architecture scalable et résiliente | Docker healthchecks + restart policies + retry tenacity + pipeline Medallion documenté |
+| C2.1 — API interopérable et sécurisée | FastAPI + JWT python-jose (HS256) + PBKDF2 passwords + endpoints GeoJSON |
+| C2.2 — Système de streaming | Apache Kafka KRaft — 5 topics urban.*, 100k enregistrements/5 min, consumer upsert MongoDB gold, rétention 24h |
+| C2.3 — Transformation multi-sources | Silver : WGS84, PIP **vectorisé geopandas.sjoin** (20–50× vs ray-casting), enrichissement IRIS/quartier, 25 sources batch |
+| C2.4 — Optimisation + mesure performance | `docs/perf_report.md` : geopandas vs ray-casting, ingestion idempotente, index GIST, logs `[PERF]` mesurés |
+| C2.5 — API filtrable + fallback temporel | FastAPI `?annee=`, `?indicateur=`, `?type=` ; fallback automatique par section si données NULL pour l'année demandée |
+| C2.6 — Dashboard cartographique interactif | MapLibre choroplèthe + 6 couches points + timeline + comparaison radar + géocodage BAN |
+| C2.7 — Dataviz accessible | Chart.js donut/radar/ligne, ARIA labels, contraste couleurs |
+| C2.8 — Indicateurs composites originaux | 4 scores (qualité vie / transports / loisirs / services) + taux_effort_achat |
