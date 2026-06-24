@@ -1,9 +1,10 @@
 """
 Gold Layer Aggregator — Urban Data Explorer Paris
-Silver (MongoDB) → Gold (PostgreSQL/PostGIS)
+Phase 1 : Silver (MinIO Parquet) → MongoDB Gold (documents géospatiaux)
+Phase 2 : MongoDB Gold → PostgreSQL/PostGIS (KPIs agrégés)
 
 Pour chaque arrondissement (1-20) :
-  1. COUNT/AVG des entités Silver par collection
+  1. COUNT/AVG des entités MongoDB Gold par collection
   2. Normalisation min-max → score 0-100
   3. Score composite par indicateur (moyenne pondérée)
   4. Score global = moyenne des 4 indicateurs composites
@@ -16,9 +17,14 @@ import re
 import json
 import statistics
 import sys
+import time
 import requests
+import pandas as pd
+import boto3
+from io import BytesIO
 from pathlib import Path
-from pymongo import MongoClient
+from botocore.exceptions import ClientError
+from pymongo import MongoClient, UpdateOne
 from sqlalchemy import create_engine, text
 
 # Permet l'execution directe via `python pipeline/gold_aggregator.py`.
@@ -26,7 +32,10 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from pipeline.config import MONGO_URI, MONGO_DB, POSTGRES_DSN, BAN_API
+from pipeline.config import (
+    MONGO_URI, MONGO_DB, POSTGRES_DSN, BAN_API,
+    MINIO_ENDPOINT, MINIO_ACCESS_KEY, MINIO_SECRET_KEY, BUCKET_SILVER,
+)
 from pipeline.progress_utils import tqdm
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -52,6 +61,132 @@ def get_mongo():
 
 def get_engine():
     return create_engine(POSTGRES_DSN)
+
+
+def _get_s3():
+    return boto3.client(
+        "s3",
+        endpoint_url=MINIO_ENDPOINT,
+        aws_access_key_id=MINIO_ACCESS_KEY,
+        aws_secret_access_key=MINIO_SECRET_KEY,
+    )
+
+
+# ─── Phase 1 : Silver Parquet → MongoDB Gold ──────────────────────────────────
+
+# (collection_mongo, id_col, indicateur)
+_MONGO_LOAD_CONFIG = {
+    "ilots_fraicheur_espaces_verts": ("silver_espaces_verts",      "identifiant",    "qualite_vie"),
+    "ilots_fraicheur_equipements":   ("silver_equipements",        "identifiant",    "qualite_vie"),
+    "arbres":                        ("silver_arbres",             "idbase",         "qualite_vie"),
+    "qualite_air":                   ("silver_qualite_air",        "annee",          "qualite_vie"),
+    "fibre_actuel":                  ("silver_fibre_actuel",       None,             "qualite_vie"),
+    "fibre_base_imb":                ("silver_fibre_imb",          "imb_id",         "qualite_vie"),
+    "fibre_base_imb_fc":             ("silver_fibre_imb_fc",       "immeuble_id",    "qualite_vie"),
+    "fibre_debit_filaire":           ("silver_fibre_debit",        "code_dep",       "qualite_vie"),
+    "fibre_operateur":               ("silver_fibre_operateur",    "code",           "qualite_vie"),
+    "zones_touristiques":            ("silver_zones_touristiques", None,             "qualite_vie"),
+    "gares":                         ("silver_gares",              None,             "transports"),
+    "bus":                           ("silver_bus",                None,             "transports"),
+    "evenements_paris":              ("silver_evenements",         None,             "loisirs"),
+    "terrasses":                     ("silver_terrasses",          None,             "loisirs"),
+    "cinemas_idf":                   ("silver_cinemas",            None,             "loisirs"),
+    "musees_idf":                    ("silver_musees",             None,             "loisirs"),
+    "ecoles_elementaires":           ("silver_ecoles_elem",        None,             "services_publics"),
+    "maternelles_secteurs":          ("silver_maternelles",        None,             "services_publics"),
+    "colleges_secteurs":             ("silver_colleges",           None,             "services_publics"),
+    "bibliotheques":                 ("silver_bibliotheques",      None,             "services_publics"),
+    "enseignement_superieur":        ("silver_ensup",              None,             "services_publics"),
+    "bureaux_poste":                 ("silver_bureaux_poste",      None,             "services_publics"),
+    "revenus_medians":               ("silver_revenus",            "arrondissement", "immobilier"),
+    "logements_sociaux":             ("silver_logements_sociaux",  None,             "immobilier"),
+    "dvf_prix_m2":                   ("silver_dvf",                None,             "immobilier"),
+}
+
+_BULK_CHUNK = 5_000
+
+
+def _latest_silver_date(s3) -> str | None:
+    """Trouve la partition ingestion_date= la plus récente dans MinIO silver."""
+    try:
+        resp = s3.list_objects_v2(Bucket=BUCKET_SILVER, Delimiter="/", Prefix="ingestion_date=")
+        prefixes = [p["Prefix"] for p in resp.get("CommonPrefixes", [])]
+        dates = []
+        for p in prefixes:
+            import re as _re
+            m = _re.match(r"ingestion_date=(\d{4}-\d{2}-\d{2})/", p)
+            if m:
+                dates.append(m.group(1))
+        return max(dates) if dates else None
+    except Exception:
+        return None
+
+
+def _read_silver_clean(s3, dataset_id: str, indicateur: str, ingestion_date: str) -> pd.DataFrame | None:
+    key = f"ingestion_date={ingestion_date}/{indicateur}/{dataset_id}/clean.parquet"
+    try:
+        obj = s3.get_object(Bucket=BUCKET_SILVER, Key=key)
+        return pd.read_parquet(BytesIO(obj["Body"].read()))
+    except ClientError as e:
+        if e.response["Error"]["Code"] in ("404", "NoSuchKey"):
+            log.warning(f"  Silver absent : {key}")
+            return None
+        raise
+
+
+def _write_mongo_collection(db, df: pd.DataFrame, collection_name: str, id_col: str | None):
+    """Écrit un DataFrame dans MongoDB Gold (upsert ou bulk insert)."""
+    coll = db[collection_name]
+    records = df.where(pd.notna(df), other=None).to_dict("records")
+    if not records:
+        return
+
+    if id_col and id_col in df.columns and len(records) < 10_000:
+        ops = [UpdateOne({id_col: r[id_col]}, {"$set": r}, upsert=True) for r in records]
+        result = coll.bulk_write(ops, ordered=False)
+        log.info(f"    ✓ MongoDB gold/{collection_name} — upserted={result.upserted_count} modified={result.modified_count}")
+    else:
+        coll.drop()
+        total = 0
+        for i in range(0, len(records), _BULK_CHUNK):
+            coll.insert_many(records[i:i + _BULK_CHUNK], ordered=False)
+            total += min(_BULK_CHUNK, len(records) - i)
+        log.info(f"    ✓ MongoDB gold/{collection_name} — {total} insérés (bulk)")
+
+    if "location" in df.columns:
+        try:
+            coll.create_index([("location", "2dsphere")])
+        except Exception:
+            pass
+    for idx_col in ("arrondissement", "quartier_id", "iris_id", "_indicateur"):
+        if idx_col in df.columns:
+            coll.create_index(idx_col)
+
+
+def load_silver_to_mongo(db, ingestion_date: str | None = None) -> str:
+    """Phase 1 Gold : lit les clean.parquet Silver et les charge dans MongoDB Gold."""
+    s3 = _get_s3()
+    if ingestion_date is None:
+        ingestion_date = _latest_silver_date(s3)
+        if not ingestion_date:
+            raise RuntimeError("Aucune partition Silver trouvée dans MinIO — lancer silver_transformer d'abord")
+    log.info(f"  Partition Silver : ingestion_date={ingestion_date}")
+
+    ok, skip, ko = 0, 0, 0
+    for dataset_id, (collection, id_col, indicateur) in _MONGO_LOAD_CONFIG.items():
+        df = _read_silver_clean(s3, dataset_id, indicateur, ingestion_date)
+        if df is None:
+            skip += 1
+            continue
+        try:
+            _write_mongo_collection(db, df, collection, id_col)
+            ok += 1
+        except Exception as e:
+            log.error(f"  ✗ {dataset_id} → {collection} : {e}")
+            ko += 1
+
+    log.info(f"  Phase 1 terminée — {ok} collections chargées, {skip} absentes, {ko} erreurs")
+    return ingestion_date
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -2363,6 +2498,7 @@ def upsert_iris_kpis(engine, kpis_by_iris: dict, annee: int):
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 def run(annee: int | None = None):
+    _t0 = time.perf_counter()
     from datetime import date
     from init_db import run as init_gold_schema
 
@@ -2374,6 +2510,10 @@ def run(annee: int | None = None):
     init_gold_schema()
 
     db = get_mongo()
+
+    log.info("\n── Phase 1/2 : Silver Parquet → MongoDB Gold ──")
+    load_silver_to_mongo(db)
+    log.info("── Phase 2/2 : MongoDB Gold → PostgreSQL KPIs ──\n")
     engine = get_engine()
     current_year = date.today().year
     dvf_years = sorted(v for v in db["silver_dvf"].distinct("annee") if isinstance(v, int))
@@ -2484,6 +2624,8 @@ def run(annee: int | None = None):
             )
         log.info("=" * 60)
 
+    elapsed = time.perf_counter() - _t0
+    log.info(f"[PERF] gold_aggregator : {elapsed:.1f}s — annee={annee or 'auto'}")
     step_progress.close()
     engine.dispose()
 

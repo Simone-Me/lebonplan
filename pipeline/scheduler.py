@@ -44,9 +44,9 @@ def run_pipeline():
     try:
         log.info("Étape 1/3 — Bronze (ingestion sources)")
         bronze.run()
-        log.info("Étape 2/3 — Silver (transformation MongoDB)")
+        log.info("Étape 2/3 — Silver (MinIO Parquet uniquement)")
         silver.run()
-        log.info("Étape 3/3 — Gold (agrégation PostgreSQL)")
+        log.info("Étape 3/3 — Gold (Phase 1 : Silver→MongoDB Gold | Phase 2 : MongoDB→PostgreSQL)")
         gold.run()
         elapsed = (datetime.now() - start).total_seconds()
         log.info(f"=== Pipeline terminé en {elapsed:.1f} s ===")

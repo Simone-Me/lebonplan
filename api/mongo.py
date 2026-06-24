@@ -11,5 +11,5 @@ def get_mongo_db():
     if _client is None:
         uri = os.getenv("MONGO_URI", "mongodb://admin:password123@localhost:27017")
         _client = MongoClient(uri)
-    db_name = os.getenv("MONGO_DB", "silver")
+    db_name = os.getenv("MONGO_DB", "gold")
     return _client[db_name]
