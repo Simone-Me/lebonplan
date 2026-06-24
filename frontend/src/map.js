@@ -1,5 +1,11 @@
 import maplibregl from "maplibre-gl";
 import { fetchPointsGeoJSON } from "./api.js";
+import bikeSvg from "lucide-static/icons/bike.svg?raw";
+import filmSvg from "lucide-static/icons/film.svg?raw";
+import landmarkSvg from "lucide-static/icons/landmark.svg?raw";
+import librarySvg from "lucide-static/icons/library.svg?raw";
+import treesSvg from "lucide-static/icons/trees.svg?raw";
+import trainFrontTunnelSvg from "lucide-static/icons/train-front-tunnel.svg?raw";
 
 let map = null;
 let popup = null;
@@ -686,8 +692,122 @@ const POINT_COLORS = {
   cinemas:       "#ec4899",
   bibliotheques: "#14b8a6",
 };
+const POINT_ICONS = {
+  velib: bikeSvg,
+  cinemas: filmSvg,
+  bibliotheques: librarySvg,
+  espaces_verts: treesSvg,
+  musees: landmarkSvg,
+  gares: trainFrontTunnelSvg,
+};
+const POINT_ICON_SIZE = 25;
 
-const _pointPopup = new maplibregl.Popup({ closeButton: false, closeOnClick: false });
+const POINT_POPUP_OFFSET = [0, 14];
+const _pointHoverPopup = new maplibregl.Popup({
+  closeButton: false,
+  closeOnClick: false,
+  className: "map-popup map-popup-point",
+  anchor: "top",
+  offset: POINT_POPUP_OFFSET,
+});
+const _pointPinnedPopup = new maplibregl.Popup({
+  closeButton: true,
+  closeOnClick: false,
+  className: "map-popup map-popup-point",
+  anchor: "top",
+  offset: POINT_POPUP_OFFSET,
+});
+let _pinnedPointId = null;
+
+function getPointPopupId(type, feature) {
+  const props = feature?.properties || {};
+  const geometry = feature?.geometry?.coordinates || [];
+  return [
+    type,
+    props.nom || "",
+    props.id || "",
+    props.identifiant || "",
+    geometry[0] ?? "",
+    geometry[1] ?? "",
+  ].join("|");
+}
+
+function getPointLngLat(feature, fallbackLngLat) {
+  const coords = feature?.geometry?.coordinates;
+  if (Array.isArray(coords) && coords.length >= 2) {
+    return coords;
+  }
+  return fallbackLngLat;
+}
+
+function getPointPopupHTML(type, feature) {
+  const props = feature?.properties || {};
+  return `<strong>${props.nom || type}</strong><br/><span style="color:#94a3b8;font-size:11px">${type}</span>`;
+}
+
+function openPinnedPointPopup(type, feature, fallbackLngLat) {
+  if (!map || !feature) return;
+  _pinnedPointId = getPointPopupId(type, feature);
+  _pointHoverPopup.remove();
+  _pointPinnedPopup
+    .setLngLat(getPointLngLat(feature, fallbackLngLat))
+    .setHTML(getPointPopupHTML(type, feature))
+    .addTo(map);
+}
+
+_pointPinnedPopup.on("close", () => {
+  _pinnedPointId = null;
+});
+
+function svgToDataUrl(svg) {
+  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+}
+
+function buildPointIconSvg(type) {
+  const iconSvg = POINT_ICONS[type];
+  if (!iconSvg) return null;
+
+  const innerSvg = iconSvg
+    .replace(/<svg[^>]*>/i, "")
+    .replace(/<\/svg>\s*$/i, "")
+    .trim();
+
+  const color = POINT_COLORS[type] ?? "#6b7280";
+  return `
+    <svg xmlns="http://www.w3.org/2000/svg" width="${POINT_ICON_SIZE}" height="${POINT_ICON_SIZE}" viewBox="0 0 40 40">
+      <circle cx="20" cy="20" r="16" fill="${color}" />
+      <circle cx="20" cy="20" r="15.25" fill="none" stroke="rgba(255,255,255,0.94)" stroke-width="1.5" />
+      <g transform="translate(8 8)" stroke="#ffffff" fill="none" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+        ${innerSvg}
+      </g>
+    </svg>
+  `.trim();
+}
+
+function loadImageElement(src) {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = reject;
+    image.src = src;
+  });
+}
+
+async function ensurePointIconLoaded(type) {
+  if (!map) return null;
+
+  const iconId = `point-icon-${type}`;
+  if (map.hasImage(iconId)) return iconId;
+
+  const svg = buildPointIconSvg(type);
+  if (!svg) return null;
+
+  const image = await loadImageElement(svgToDataUrl(svg));
+  if (!map.hasImage(iconId)) {
+    map.addImage(iconId, image);
+  }
+  return iconId;
+}
 
 async function renderPointLayer(type) {
   if (!map || !map.isStyleLoaded()) return;
@@ -703,8 +823,20 @@ async function renderPointLayer(type) {
       map.addSource(sourceId, { type: "geojson", data: geojson });
     }
 
+    const iconId = await ensurePointIconLoaded(type);
+
     if (!map.getLayer(layerId)) {
-      map.addLayer({
+      map.addLayer(iconId ? {
+        id: layerId,
+        type: "symbol",
+        source: sourceId,
+        layout: {
+          "icon-image": iconId,
+          "icon-size": 1,
+          "icon-allow-overlap": true,
+          "icon-ignore-placement": true,
+        },
+      } : {
         id: layerId,
         type: "circle",
         source: sourceId,
@@ -725,15 +857,23 @@ async function renderPointLayer(type) {
     if (!pointLayerEventsBound.has(layerId)) {
       map.on("mouseenter", layerId, (e) => {
         map.getCanvas().style.cursor = "pointer";
-        const props = e.features[0].properties;
-        _pointPopup
-          .setLngLat(e.lngLat)
-          .setHTML(`<strong>${props.nom || type}</strong><br/><span style="color:#94a3b8;font-size:11px">${type}</span>`)
+        const feature = e.features?.[0];
+        if (!feature) return;
+        if (_pinnedPointId === getPointPopupId(type, feature)) return;
+        _pointHoverPopup
+          .setLngLat(getPointLngLat(feature, e.lngLat))
+          .setHTML(getPointPopupHTML(type, feature))
           .addTo(map);
       });
       map.on("mouseleave", layerId, () => {
         map.getCanvas().style.cursor = "";
-        _pointPopup.remove();
+        _pointHoverPopup.remove();
+      });
+      map.on("click", layerId, (e) => {
+        const feature = e.features?.[0];
+        if (!feature) return;
+        map.getCanvas().style.cursor = "pointer";
+        openPinnedPointPopup(type, feature, e.lngLat);
       });
       pointLayerEventsBound.add(layerId);
     }
