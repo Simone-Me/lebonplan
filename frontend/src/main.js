@@ -9,6 +9,7 @@ import {
   clearAreaSelection,
   setMapLevelSyncHandler,
   setSelectionGeoJSONCache,
+  syncSelectionFromArea,
 } from "./map.js";
 import { openSidebar, closeSidebar } from "./sidebar.js";
 import { initCompare } from "./compare.js";
@@ -31,7 +32,7 @@ let currentIndicateur = "score_global";
 let currentScale = { min: 0, max: 100 };
 let currentLevel = "quartier";
 let hasLoadedData = false;
-let selectionCachesReady = false;
+let currentAreaSelection = null;
 const LEVEL_ORDER = {
   arrondissement: 0,
   quartier: 1,
@@ -94,14 +95,18 @@ function formatLegendValue(value) {
   return Number(value).toLocaleString("fr-FR", { maximumFractionDigits: 1 });
 }
 
-async function refreshMap() {
+async function refreshMap(prefetchedGeojson = null) {
   try {
-    const geojson = await fetchGeoJSON(currentAnnee, currentIndicateur, currentLevel);
+    const geojson = prefetchedGeojson || await fetchGeoJSON(currentAnnee, currentIndicateur, currentLevel);
     setSelectionGeoJSONCache(currentLevel, geojson);
     currentScale =
       updateMapData(geojson, currentIndicateur, INDICATEUR_LABELS[currentIndicateur], currentLevel) ??
       currentScale;
     updateLegend();
+    if (currentAreaSelection?.level === currentLevel) {
+      syncSelectionFromArea(currentAreaSelection);
+      openSidebar(currentAreaSelection, currentAnnee, getIndicatorScale, currentAreaSelection.level);
+    }
   } catch (e) {
     console.error("Erreur fetchGeoJSON", e);
   }
@@ -118,6 +123,7 @@ function setActiveLevelButton(level) {
 async function setCurrentLevel(level, { force = false } = {}) {
   if (!force && level === currentLevel) return;
   currentLevel = level;
+  currentAreaSelection = null;
   setActiveLevelButton(level);
   clearCompareHighlights();
   clearAreaSelection();
@@ -125,8 +131,7 @@ async function setCurrentLevel(level, { force = false } = {}) {
   await refreshMap();
 }
 
-async function preloadSelectionCaches() {
-  if (selectionCachesReady) return;
+async function loadSelectionCaches() {
   const [arr, quartier, iris] = await Promise.all([
     fetchGeoJSON(currentAnnee, currentIndicateur, "arrondissement"),
     fetchGeoJSON(currentAnnee, currentIndicateur, "quartier"),
@@ -135,7 +140,34 @@ async function preloadSelectionCaches() {
   setSelectionGeoJSONCache("arrondissement", arr);
   setSelectionGeoJSONCache("quartier", quartier);
   setSelectionGeoJSONCache("iris", iris);
-  selectionCachesReady = true;
+  return {
+    arrondissement: arr,
+    quartier,
+    iris,
+  };
+}
+
+async function reloadMapContext() {
+  const geojsonByLevel = await loadSelectionCaches();
+  await refreshMap(geojsonByLevel[currentLevel] || null);
+}
+
+async function hardRefreshCurrentLevel({ preserveSelection = true } = {}) {
+  const selectionSnapshot = preserveSelection && currentAreaSelection
+    ? { ...currentAreaSelection }
+    : null;
+
+  clearCompareHighlights();
+  clearAreaSelection();
+
+  if (!selectionSnapshot) {
+    currentAreaSelection = null;
+    closeSidebar();
+  } else {
+    currentAreaSelection = selectionSnapshot;
+  }
+
+  await reloadMapContext();
 }
 
 function updateLegend() {
@@ -162,6 +194,7 @@ function init() {
   setActiveLevelButton(currentLevel);
   initMap((areaSelection) => {
     const selectionLevel = areaSelection?.level || currentLevel;
+    currentAreaSelection = { ...areaSelection, level: selectionLevel };
     openSidebar(areaSelection, currentAnnee, getIndicatorScale, selectionLevel);
   });
   setMapLevelSyncHandler((nextLevel) => {
@@ -171,9 +204,9 @@ function init() {
   });
 
   const indicateurSel = document.getElementById("indicateur-select");
-  indicateurSel.addEventListener("change", () => {
+  indicateurSel.addEventListener("change", async () => {
     currentIndicateur = indicateurSel.value;
-    refreshMap();
+    await hardRefreshCurrentLevel({ preserveSelection: true });
   });
 
   document.querySelectorAll(".level-btn").forEach((btn) => {
@@ -190,7 +223,7 @@ function init() {
   slider.addEventListener("input", () => {
     currentAnnee = +slider.value;
     anneeLabel.textContent = currentAnnee;
-    refreshMap();
+    hardRefreshCurrentLevel({ preserveSelection: true });
   });
 
   initGeocode();
@@ -223,11 +256,11 @@ function init() {
       if (initAttempted) return;
       initAttempted = true;
       try {
-        Promise.resolve(preloadSelectionCaches())
-          .then(() => setCurrentLevel(currentLevel, { force: true }))
+        Promise.resolve(loadSelectionCaches())
+          .then((geojsonByLevel) => refreshMap(geojsonByLevel[currentLevel] || null))
           .then(() => clearInterval(waitForMap))
           .catch((error) => {
-            console.error("Erreur preloadSelectionCaches", error);
+            console.error("Erreur loadSelectionCaches", error);
             clearInterval(waitForMap);
           });
       } catch (_) {

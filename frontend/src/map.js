@@ -37,7 +37,7 @@ const STYLES = {
 const SELECTION_COLORS = {
   arrondissement: "#ffffff",
   quartier: "#111827",
-  iris: "#f59e0b",
+  iris: "#130bf5",
 };
 const SELECTION_FILL_COLORS = {
   arrondissement: "rgba(255,255,255,0.18)",
@@ -110,7 +110,31 @@ function scoreToColor(steps) {
   );
 }
 
-function computeScale(values) {
+function quantile(sortedValues, q) {
+  if (!sortedValues.length) return NaN;
+  if (sortedValues.length === 1) return sortedValues[0];
+  const index = (sortedValues.length - 1) * q;
+  const lower = Math.floor(index);
+  const upper = Math.ceil(index);
+  if (lower === upper) return sortedValues[lower];
+  const weight = index - lower;
+  return sortedValues[lower] * (1 - weight) + sortedValues[upper] * weight;
+}
+
+function dedupeStepValues(steps) {
+  const deduped = [];
+  for (const [value, color] of steps) {
+    const previous = deduped[deduped.length - 1];
+    if (previous && previous[0] === value) {
+      previous[1] = color;
+      continue;
+    }
+    deduped.push([value, color]);
+  }
+  return deduped;
+}
+
+function computeScale(values, strategy = "linear") {
   const finiteValues = values.filter((value) => Number.isFinite(value));
   if (!finiteValues.length) {
     return {
@@ -118,16 +142,17 @@ function computeScale(values) {
       max: 100,
       steps: [
         [0, "#ef4444"],
-        [25, "#f97316"],
-        [50, "#f59e0b"],
-        [75, "#84cc16"],
+        [40, "#f97316"],
+        [70, "#f59e0b"],
+        [85, "#84cc16"],
         [100, "#22c55e"],
       ],
     };
   }
 
-  const min = Math.min(...finiteValues);
-  const max = Math.max(...finiteValues);
+  const sortedValues = [...finiteValues].sort((a, b) => a - b);
+  const min = sortedValues[0];
+  const max = sortedValues[sortedValues.length - 1];
   if (min === max) {
     return {
       min,
@@ -136,6 +161,20 @@ function computeScale(values) {
         [min, "#f59e0b"],
         [min + 1e-6, "#f59e0b"],
       ],
+    };
+  }
+
+  if (strategy === "quantile") {
+    return {
+      min,
+      max,
+      steps: dedupeStepValues([
+        [min, "#ef4444"],
+        [quantile(sortedValues, 0.25), "#f97316"],
+        [quantile(sortedValues, 0.5), "#f59e0b"],
+        [quantile(sortedValues, 0.75), "#84cc16"],
+        [max, "#22c55e"],
+      ]),
     };
   }
 
@@ -164,6 +203,12 @@ function reverseScale(scale) {
 
 function toNumericOrNaN(value) {
   return value == null ? NaN : Number(value);
+}
+
+function getScaleStrategy(indicator) {
+  if (!indicator) return "linear";
+  if (indicator.startsWith("score_")) return "quantile";
+  return "linear";
 }
 
 function applyCurrentScale() {
@@ -247,6 +292,21 @@ function updateSelectionFromFeature(feature) {
     irisId: typeof props.iris_id === "string" ? props.iris_id : null,
   };
   applySelectionLayers();
+}
+
+function findFeatureBySelection(selection) {
+  if (!selection?.level || !currentGeoJSON?.features?.length) return null;
+  const field = getAreaIdField(selection.level);
+  const targetId = selection.area_id ?? selection.areaId;
+  if (targetId == null || targetId === "") return null;
+
+  return currentGeoJSON.features.find((feature) => {
+    const props = feature?.properties || {};
+    if (selection.level === "arrondissement") {
+      return Number(props[field]) === Number(targetId);
+    }
+    return String(props[field] ?? "") === String(targetId);
+  }) || null;
 }
 
 function setupLayers() {
@@ -487,20 +547,20 @@ export function updateMapData(geojson, indicateur, indicateurLabel, areaLevel = 
     },
   }));
 
+  const indicatorValues = features.map((feature) => toNumericOrNaN(feature.properties.__score));
   const baseScale = computeScale(
-    features.map((feature) => {
-      return toNumericOrNaN(feature.properties.__score);
-    })
+    indicatorValues,
+    getScaleStrategy(indicateur)
   );
   currentScale = REVERSED_SCALE_INDICATORS.has(indicateur)
     ? reverseScale(baseScale)
     : baseScale;
   Object.assign(currentScalesByIndicator, {
-    score_global: computeScale(features.map((feature) => toNumericOrNaN(feature.properties.score_global))),
-    score_qualite_vie: computeScale(features.map((feature) => toNumericOrNaN(feature.properties.score_qualite_vie))),
-    score_transports: computeScale(features.map((feature) => toNumericOrNaN(feature.properties.score_transports))),
-    score_loisirs: computeScale(features.map((feature) => toNumericOrNaN(feature.properties.score_loisirs))),
-    score_services: computeScale(features.map((feature) => toNumericOrNaN(feature.properties.score_services))),
+    score_global: computeScale(features.map((feature) => toNumericOrNaN(feature.properties.score_global)), "quantile"),
+    score_qualite_vie: computeScale(features.map((feature) => toNumericOrNaN(feature.properties.score_qualite_vie)), "quantile"),
+    score_transports: computeScale(features.map((feature) => toNumericOrNaN(feature.properties.score_transports)), "quantile"),
+    score_loisirs: computeScale(features.map((feature) => toNumericOrNaN(feature.properties.score_loisirs)), "quantile"),
+    score_services: computeScale(features.map((feature) => toNumericOrNaN(feature.properties.score_services)), "quantile"),
     prix_m2_median: computeScale(features.map((feature) => toNumericOrNaN(feature.properties.prix_m2_median))),
     nb_logements_sociaux: computeScale(features.map((feature) => toNumericOrNaN(feature.properties.nb_logements_sociaux))),
   });
@@ -512,8 +572,9 @@ export function updateMapData(geojson, indicateur, indicateurLabel, areaLevel = 
   const src = map.getSource("quartiers");
   if (src) src.setData(currentGeoJSON);
   applyCurrentScale();
-  clearAreaSelection();
+  applySelectionLayers();
   restoreActivePointLayers();
+  map.triggerRepaint?.();
 
   return { min: currentScale.min, max: currentScale.max };
 }
@@ -599,6 +660,20 @@ export function setSelectionGeoJSONCache(level, geojson) {
   if (currentSelection) {
     applySelectionLayers();
   }
+}
+
+export function syncSelectionFromArea(selection) {
+  if (!selection) {
+    clearAreaSelection();
+    return false;
+  }
+  const feature = findFeatureBySelection(selection);
+  if (!feature) {
+    clearAreaSelection();
+    return false;
+  }
+  updateSelectionFromFeature(feature);
+  return true;
 }
 
 // ─── Couche de points Silver ──────────────────────────────────────────────────

@@ -2,6 +2,10 @@ import { Chart } from "chart.js/auto";
 import { fetchKPIs, fetchTimeline } from "./api.js";
 
 let timelineChart = null;
+let sidebarViewState = {
+  activeTab: "scores",
+  openSections: [],
+};
 
 function fmt(v, unit = "") {
   return v != null ? `${Number(v).toLocaleString("fr-FR")}${unit}` : "—";
@@ -9,10 +13,30 @@ function fmt(v, unit = "") {
 
 function normalizeForDisplay(value, scale) {
   if (value == null) return 0;
+  const numericValue = Number(value);
+  const steps = Array.isArray(scale?.steps) ? scale.steps : null;
+  if (steps && steps.length >= 2) {
+    if (numericValue <= steps[0][0]) return 0;
+    if (numericValue >= steps[steps.length - 1][0]) return 100;
+    for (let i = 1; i < steps.length; i += 1) {
+      const [leftValue] = steps[i - 1];
+      const [rightValue] = steps[i];
+      if (numericValue <= rightValue) {
+        if (rightValue === leftValue) {
+          return Math.round((i / (steps.length - 1)) * 100);
+        }
+        const bandStart = ((i - 1) / (steps.length - 1)) * 100;
+        const bandEnd = (i / (steps.length - 1)) * 100;
+        const ratio = (numericValue - leftValue) / (rightValue - leftValue);
+        return Math.max(0, Math.min(100, bandStart + (bandEnd - bandStart) * ratio));
+      }
+    }
+  }
+
   const min = scale?.min ?? 0;
   const max = scale?.max ?? 100;
   if (!Number.isFinite(min) || !Number.isFinite(max) || min === max) return 50;
-  const pct = ((Number(value) - min) / (max - min)) * 100;
+  const pct = ((numericValue - min) / (max - min)) * 100;
   return Math.max(0, Math.min(100, pct));
 }
 
@@ -55,7 +79,37 @@ function detailSection(title, rows) {
     </div>`;
 }
 
+function readSidebarViewState(root = document) {
+  const activeTab = root.querySelector(".tab.active")?.dataset.tab || sidebarViewState.activeTab || "scores";
+  const openSections = [...root.querySelectorAll(".detail-toggle.open")]
+    .map((btn) => btn.dataset.target)
+    .filter(Boolean);
+  return { activeTab, openSections };
+}
+
+function applySidebarViewState(root) {
+  const activeTab = sidebarViewState.activeTab || "scores";
+  const tabs = root.querySelectorAll(".tab");
+  const panels = root.querySelectorAll(".tab-panel");
+  tabs.forEach((tab) => {
+    const isActive = tab.dataset.tab === activeTab;
+    tab.classList.toggle("active", isActive);
+  });
+  panels.forEach((panel) => {
+    panel.classList.toggle("active", panel.id === `tab-${activeTab}`);
+  });
+
+  const openSections = new Set(sidebarViewState.openSections || []);
+  root.querySelectorAll(".detail-toggle").forEach((btn) => {
+    const isOpen = openSections.has(btn.dataset.target);
+    btn.classList.toggle("open", isOpen);
+    const body = root.querySelector(`#${btn.dataset.target}`);
+    body?.classList.toggle("open", isOpen);
+  });
+}
+
 export async function openSidebar(areaSelection, annee, getIndicatorScale, level = "quartier") {
+  sidebarViewState = readSidebarViewState(document.getElementById("sidebar-content"));
   const areaId = typeof areaSelection === "object"
     ? areaSelection.area_id
       ?? areaSelection.iris_id
@@ -208,6 +262,7 @@ export async function openSidebar(areaSelection, annee, getIndicatorScale, level
 
     bindTabs(content);
     bindAccordions(content);
+    applySidebarViewState(content);
     renderTimeline(timeline);
     renderDonutSurfaces(kpis);
 
@@ -225,6 +280,7 @@ function bindTabs(root) {
       panels.forEach((p) => p.classList.remove("active"));
       tab.classList.add("active");
       root.querySelector(`#tab-${tab.dataset.tab}`).classList.add("active");
+      sidebarViewState.activeTab = tab.dataset.tab;
     });
   });
 }
@@ -235,6 +291,9 @@ function bindAccordions(root) {
       const body = root.querySelector(`#${btn.dataset.target}`);
       const open = btn.classList.toggle("open");
       body.classList.toggle("open", open);
+      sidebarViewState.openSections = [...root.querySelectorAll(".detail-toggle.open")]
+        .map((toggle) => toggle.dataset.target)
+        .filter(Boolean);
     });
   });
 }
