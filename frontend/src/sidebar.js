@@ -1,5 +1,6 @@
 import { Chart } from "chart.js/auto";
 import { fetchKPIs, fetchTimeline, fetchStreamingStatus } from "./api.js";
+import { isFavorite } from "./favorites.js";
 
 let timelineChart    = null;
 let _streamingTimer  = null;
@@ -18,23 +19,45 @@ function normalizeForDisplay(value, scale) {
 }
 
 function scoreColor(pct) {
-  if (pct >= 75) return "#22c55e";
+  if (pct >= 75) return "#10b981";
   if (pct >= 50) return "#84cc16";
   if (pct >= 25) return "#f59e0b";
-  if (pct > 0) return "#f97316";
-  return "#ef4444";
+  if (pct > 0)   return "#f97316";
+  return "#f43f5e";
+}
+
+function scoreRing(pct, color, size = 44) {
+  const strokeW = 3.5;
+  const r = (size - strokeW * 2) / 2;
+  const c = size / 2;
+  const circ = 2 * Math.PI * r;
+  const filled = (pct / 100) * circ;
+  return `<svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}"
+    class="score-ring-svg" aria-hidden="true"
+    style="transform:rotate(-90deg)">
+    <circle cx="${c}" cy="${c}" r="${r}" fill="none"
+      stroke="rgba(255,255,255,0.07)" stroke-width="${strokeW}"/>
+    <circle cx="${c}" cy="${c}" r="${r}" fill="none"
+      stroke="${color}" stroke-width="${strokeW}"
+      stroke-dasharray="${filled.toFixed(2)} ${(circ - filled).toFixed(2)}"
+      stroke-linecap="round"/>
+  </svg>`;
 }
 
 function scoreCard(label, value, scale, fullWidth = false) {
   const pct = normalizeForDisplay(value, scale);
   const color = scoreColor(pct);
   const displayValue = value != null ? Math.round(value) : "—";
+  const ring = value != null ? scoreRing(pct, color) : "";
   return `
     <div class="score-card${fullWidth ? " full-width" : ""}">
-      <div class="score-card-label">${label}</div>
-      <div class="score-card-value" style="color:${color}">${displayValue}</div>
+      <div class="score-card-header">
+        <span class="score-card-label">${label}</span>
+        ${ring}
+      </div>
+      <div class="score-card-value" style="color:${color}">${displayValue}<span class="score-unit">/100</span></div>
       <div class="score-track">
-        <div class="score-fill" style="width:${pct}%;background:${color}"></div>
+        <div class="score-fill" style="width:${pct}%;background:${color};box-shadow:0 0 8px ${color}55"></div>
       </div>
     </div>`;
 }
@@ -57,6 +80,28 @@ function detailSection(title, rows, dataAnnee, sliderAnnee) {
       <div class="detail-body" id="${id}">
         ${rows.map(([label, val]) => `
           <div class="kpi-row"><span>${label}</span><b>${val}</b></div>`).join("")}
+      </div>
+    </div>`;
+}
+
+function renderSkeleton() {
+  return `
+    <div class="skeleton-loader">
+      <div style="padding:4px 0 12px">
+        <div class="skel-line" style="width:60%;height:16px;margin-bottom:8px"></div>
+        <div class="skel-line sm" style="width:40%"></div>
+      </div>
+      <div class="skel-tabs">
+        <div class="skel-tab"></div>
+        <div class="skel-tab"></div>
+        <div class="skel-tab"></div>
+      </div>
+      <div class="skel-scores">
+        <div class="skel-score-card" style="grid-column:1/-1;height:80px"></div>
+        <div class="skel-score-card"></div>
+        <div class="skel-score-card"></div>
+        <div class="skel-score-card"></div>
+        <div class="skel-score-card"></div>
       </div>
     </div>`;
 }
@@ -86,6 +131,18 @@ function startStreamingCountdown(lastUpdate, intervalSeconds) {
   _streamingTimer = setInterval(tick, 1000);
 }
 
+function favBtn(areaId, level, name) {
+  const fav = isFavorite(areaId, level);
+  return `<button type="button" class="btn-favorite${fav ? " is-fav" : ""}"
+    data-area-id="${areaId}" data-level="${level}" data-name="${name}"
+    title="${fav ? "Retirer des favoris" : "Ajouter aux favoris"}"
+    aria-label="${fav ? "Retirer des favoris" : "Ajouter aux favoris"}">
+    <svg viewBox="0 0 24 24" fill="${fav ? "currentColor" : "none"}" stroke="currentColor" stroke-width="2">
+      <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"></path>
+    </svg>
+  </button>`;
+}
+
 export async function openSidebar(areaSelection, annee, getIndicatorScale, level = "quartier") {
   const areaId = typeof areaSelection === "object"
     ? areaSelection.area_id
@@ -98,7 +155,7 @@ export async function openSidebar(areaSelection, annee, getIndicatorScale, level
     : { area_id: areaSelection, level };
 
   const content = document.getElementById("sidebar-content");
-  content.innerHTML = `<p class="loading">Chargement…</p>`;
+  content.innerHTML = renderSkeleton();
 
   try {
     const [kpis, timeline, streamingStatus] = await Promise.all([
@@ -125,18 +182,22 @@ export async function openSidebar(areaSelection, annee, getIndicatorScale, level
       irisCode ? `IRIS ${irisCode}` : null,
       irisType ? `Type ${irisType}` : null,
     ].filter(Boolean).join(" · ");
+
     const scales = {
-      score_global: getIndicatorScale?.("score_global"),
-      score_qualite_vie: getIndicatorScale?.("score_qualite_vie"),
+      score_global:     getIndicatorScale?.("score_global"),
+      score_qualite_vie:getIndicatorScale?.("score_qualite_vie"),
       score_transports: getIndicatorScale?.("score_transports"),
-      score_loisirs: getIndicatorScale?.("score_loisirs"),
-      score_services: getIndicatorScale?.("score_services"),
+      score_loisirs:    getIndicatorScale?.("score_loisirs"),
+      score_services:   getIndicatorScale?.("score_services"),
     };
 
     content.innerHTML = `
       <div class="q-header">
-        <div class="q-name">${nom}</div>
-        <div class="q-meta">${metaLigne}</div>
+        <div class="q-header-text">
+          <div class="q-name">${nom}</div>
+          <div class="q-meta">${metaLigne}</div>
+        </div>
+        ${favBtn(areaId, level, nom)}
       </div>
 
       <div class="tabs">
@@ -161,7 +222,7 @@ export async function openSidebar(areaSelection, annee, getIndicatorScale, level
         ${streamingStatus ? `
         <div class="streaming-status" title="Vélib · Sanisettes · Chantiers · Anomalies · Voies — rafraîchis toutes les 5 min via Kafka">
           <span class="streaming-dot"></span>
-          <span>Données temps réel — prochain rafraîchissement dans <b id="streaming-timer-value">…</b></span>
+          <span>Temps réel — prochain rafraîchissement dans <b id="streaming-timer-value">…</b></span>
         </div>` : ""}
         ${detailSection("Immobilier", [
           ["Prix m² médian",         fmt(kpis.prix_m2_median, " €")],
@@ -172,7 +233,7 @@ export async function openSidebar(areaSelection, annee, getIndicatorScale, level
             ? `${Number(kpis.revenu_median_uc).toLocaleString("fr-FR")} €/an`
             : "—"],
           ["Effort achat (50 m²)",   kpis.taux_effort_achat != null
-            ? `${Number(kpis.taux_effort_achat).toFixed(1)} ans de revenu`
+            ? `${Number(kpis.taux_effort_achat).toFixed(1)} ans`
             : "—"],
         ], kpis.annee_immo, annee)}
         <div class="detail-section">
@@ -205,17 +266,12 @@ export async function openSidebar(areaSelection, annee, getIndicatorScale, level
           ["Stations Vélib",         fmt(kpis.nb_stations_velib)],
           ["Capacité Vélib totale",  fmt(kpis.capacite_velib_totale)],
           ["Lignes distinctes",      fmt(kpis.nb_lignes_transport)],
-          ["Lignes par gare",        fmt(kpis.lignes_par_gare_moyen)],
           ["Modes lourds présents",  fmt(kpis.nb_modes_lourds)],
           ["Arrêts de bus",          fmt(kpis.nb_arrets_bus)],
           ["Arrêts accessibles",     fmt(kpis.pct_arrets_accessibles, " %")],
           ["Flux total",             fmt(kpis.flux_multimodal)],
-          ["Flux vélo/trottinette",  fmt(kpis.flux_velo_trott)],
-          ["Flux bus",               fmt(kpis.flux_bus)],
-          ["Flux motorisé",          fmt(kpis.flux_motorise)],
           ["Part vélo/trottinette",  fmt(kpis.pct_flux_velo_trott, " %")],
           ["Part motorisée",         fmt(kpis.pct_flux_motorise, " %")],
-          ["Part voies cyclables",   fmt(kpis.pct_flux_voie_cyclable, " %")],
         ], kpis.annee_transport, annee)}
         ${detailSection("Loisirs", [
           ["Événements", fmt(kpis.nb_evenements)],
@@ -301,12 +357,14 @@ function renderTimeline(timeline) {
       datasets: [{
         label: "Score global",
         data: scores,
-        borderColor: "#3b82f6",
-        backgroundColor: "rgba(59,130,246,0.12)",
-        tension: 0.35,
+        borderColor: "#6366f1",
+        backgroundColor: "rgba(99,102,241,0.12)",
+        tension: 0.38,
         fill: true,
-        pointRadius: 3,
-        pointBackgroundColor: "#3b82f6",
+        pointRadius: 4,
+        pointBackgroundColor: "#6366f1",
+        pointBorderColor: "#060b1a",
+        pointBorderWidth: 2,
       }],
     },
     options: {
@@ -315,11 +373,11 @@ function renderTimeline(timeline) {
         y: {
           min: 0, max: 100,
           grid: { color: "rgba(255,255,255,0.05)" },
-          ticks: { color: "#475569", font: { size: 10 } },
+          ticks: { color: "#6e9ac8", font: { size: 10 } },
         },
         x: {
           grid: { display: false },
-          ticks: { color: "#475569", font: { size: 10 } },
+          ticks: { color: "#6e9ac8", font: { size: 10 } },
         },
       },
     },
@@ -340,25 +398,34 @@ function renderDonutSurfaces(kpis) {
       labels: ["Studios/T1 ≤25m²", "T2 26–45m²", "T3 46–65m²", "T4+ ≥66m²"],
       datasets: [{
         data: [t1, t2, t3, t4],
-        backgroundColor: ["#3b82f6", "#22c55e", "#f59e0b", "#ef4444"],
-        borderWidth: 1,
+        backgroundColor: ["#6366f1", "#10b981", "#f59e0b", "#f43f5e"],
+        borderWidth: 0,
       }],
     },
     options: {
-      plugins: { legend: { position: "bottom", labels: { font: { size: 10 }, color: "#94a3b8" } } },
-      cutout: "60%",
+      plugins: {
+        legend: {
+          position: "bottom",
+          labels: { font: { size: 10 }, color: "#6e9ac8", padding: 12 },
+        },
+      },
+      cutout: "62%",
     },
   });
 }
 
 export function closeSidebar() {
   const content = document.getElementById("sidebar-content");
+  if (timelineChart) { timelineChart.destroy(); timelineChart = null; }
+  if (_streamingTimer) { clearInterval(_streamingTimer); _streamingTimer = null; }
   content.innerHTML = `
     <div class="sidebar-placeholder">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
-      </svg>
-          <p>Cliquez sur une zone<br/>pour explorer ses données</p>
-      </div>`;
-  if (timelineChart) { timelineChart.destroy(); timelineChart = null; }
+      <div class="placeholder-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+          <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
+        </svg>
+      </div>
+      <p>Cliquez sur une zone<br/>pour explorer ses données</p>
+      <small>ou utilisez la recherche ci-dessus</small>
+    </div>`;
 }

@@ -445,15 +445,44 @@ function attachEvents(onQuartierClick) {
     map.getCanvas().style.cursor = "pointer";
     const props = e.features[0].properties;
     const score = props.__score != null ? Number(props.__score).toFixed(1) : "—";
-    const suffixe = props.arrondissement
-      ? `<br/><span style="color:#94a3b8;font-size:11px">${props.arrondissement}e arrondissement</span>`
+
+    const niveauLabel = currentAreaLevel === "arrondissement"
+      ? "Arrondissement"
+      : currentAreaLevel === "iris"
+        ? "IRIS"
+        : "Quartier";
+    const arrStr = props.arrondissement
+      ? ` · ${props.arrondissement}e arr.`
       : "";
+
+    const prixRaw = props.prix_m2_median;
+    const prixFormatted = prixRaw != null && !Number.isNaN(Number(prixRaw))
+      ? `${Math.round(Number(prixRaw)).toLocaleString("fr-FR")} €/m²`
+      : null;
+    const prixRow = prixFormatted
+      ? `<div style="display:flex;justify-content:space-between;align-items:center;
+              border-top:1px solid rgba(148,163,184,0.2);margin-top:6px;padding-top:6px">
+           <span style="font-size:11px;color:var(--tx-3)">Prix m²</span>
+           <strong style="font-size:12px;color:var(--tx-1)">${prixFormatted}</strong>
+         </div>`
+      : "";
+
     popup
       .setLngLat(e.lngLat)
       .setHTML(
-        `<strong>${props.nom || "Quartier administratif"}</strong>${suffixe}<br/>
-         <span style="color:#94a3b8;font-size:11px">${props.__indicateur_label || "Score"}</span>
-         <strong style="float:right;color:#f1f5f9">${score}</strong>`
+        `<div style="min-width:160px">
+           <div style="font-weight:700;font-size:13px;color:var(--tx-1);margin-bottom:2px">
+             ${props.nom || niveauLabel}
+           </div>
+           <div style="font-size:10px;color:var(--tx-3);margin-bottom:7px">
+             ${niveauLabel}${arrStr}
+           </div>
+           <div style="display:flex;justify-content:space-between;align-items:baseline;gap:10px">
+             <span style="font-size:11px;color:var(--tx-2)">${props.__indicateur_label || "Score"}</span>
+             <strong style="font-size:14px;color:var(--ac)">${score}</strong>
+           </div>
+           ${prixRow}
+         </div>`
       )
       .addTo(map);
   });
@@ -484,10 +513,11 @@ function attachEvents(onQuartierClick) {
   });
 }
 
-export function initMap(onQuartierClick) {
+export function initMap(onQuartierClick, { dark = false } = {}) {
+  isDark = dark;
   map = new maplibregl.Map({
     container: "map",
-    style: STYLES.light,
+    style: dark ? STYLES.dark : STYLES.light,
     center: [2.347, 48.859],
     zoom: 11.5,
   });
@@ -904,4 +934,28 @@ export async function togglePointLayer(type, enabled) {
 
   activePointLayers.add(type);
   await renderPointLayer(type);
+}
+
+export function flyToZone(feature) {
+  if (!map || !feature?.geometry) return;
+  let minLng = Infinity, minLat = Infinity, maxLng = -Infinity, maxLat = -Infinity;
+  const scan = (coords) => {
+    if (!Array.isArray(coords)) return;
+    if (typeof coords[0] === "number") {
+      const [lng, lat] = coords;
+      if (lng < minLng) minLng = lng;
+      if (lat < minLat) minLat = lat;
+      if (lng > maxLng) maxLng = lng;
+      if (lat > maxLat) maxLat = lat;
+    } else {
+      coords.forEach(scan);
+    }
+  };
+  scan(feature.geometry.coordinates);
+  if (!isFinite(minLng)) return;
+  map.fitBounds([[minLng, minLat], [maxLng, maxLat]], {
+    padding: { top: 60, bottom: 60, left: 60, right: 60 },
+    maxZoom: 15,
+    duration: 700,
+  });
 }

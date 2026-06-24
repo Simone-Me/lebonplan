@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>LeBonPlan — Paris</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="/src/style.css" />
 </head>
 <body>
@@ -15,38 +15,40 @@
     <aside id="sidebar">
 
       <div id="sidebar-header">
-        <div class="brand-wrap">
-          <div class="brand">
-            <div class="brand-icon">LBP</div>
-            <div>
-              <div class="brand-name">LeBonPlan</div>
-              <div class="brand-sub">Paris · Analyse urbaine</div>
+        <div class="sidebar-header-inner">
+          <div class="brand-wrap">
+            <div class="brand">
+              <div class="brand-icon">LBP</div>
+              <div>
+                <div class="brand-name">LeBonPlan</div>
+                <div class="brand-sub">Paris · Analyse urbaine</div>
+              </div>
             </div>
           </div>
-        </div>
-        <div class="header-actions">
-          <div class="auth-status">
-            <div id="auth-user" class="auth-user hidden" aria-live="polite"></div>
-            <button type="button" id="auth-logout" class="btn-auth hidden" aria-label="Se déconnecter">Se déconnecter</button>
-          </div>
-          <div class="header-icon-actions">
-            <button type="button" id="sidebar-collapse" class="btn-theme" title="Réduire le panneau" aria-label="Réduire le panneau">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-                <polyline points="15 18 9 12 15 6"></polyline>
-              </svg>
-            </button>
-            <button type="button" id="theme-toggle" class="btn-theme" title="Basculer le thème de la carte" aria-label="Basculer le thème de la carte">
-              <svg id="theme-icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-                <circle cx="12" cy="12" r="5"></circle>
-                <line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line>
-                <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
-                <line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line>
-                <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
-              </svg>
-              <svg id="theme-icon-moon" class="hidden" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-                <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
-              </svg>
-            </button>
+          <div class="header-actions">
+            <div class="auth-status">
+              <div id="auth-user" class="auth-user hidden" aria-live="polite"></div>
+              <button type="button" id="auth-logout" class="btn-auth hidden" aria-label="Se déconnecter">Déconnexion</button>
+            </div>
+            <div class="header-icon-actions">
+              <button type="button" id="sidebar-collapse" class="btn-theme" title="Réduire le panneau" aria-label="Réduire le panneau">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                  <polyline points="15 18 9 12 15 6"></polyline>
+                </svg>
+              </button>
+              <button type="button" id="theme-toggle" class="btn-theme" title="Passer en mode sombre" aria-label="Basculer le thème de la carte">
+                <svg id="theme-icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                  <circle cx="12" cy="12" r="5"></circle>
+                  <line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line>
+                  <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+                  <line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line>
+                  <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+                </svg>
+                <svg id="theme-icon-moon" class="hidden" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                  <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
+                </svg>
+              </button>
+            </div>
           </div>
         </div>
       </div>
@@ -54,48 +56,61 @@
       <div id="sidebar-scroll">
         <div id="sidebar-controls">
 
+          <!-- Niveau géographique -->
           <div class="control-group">
             <label class="control-label" for="level-switch">
               <svg class="ctrl-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M3 7h18M6 12h12M10 17h4"></path></svg>
               Niveau géographique
             </label>
             <div id="level-switch" class="level-switch" role="tablist" aria-label="Choisir le niveau géographique">
-              <button type="button" class="level-btn" data-level="arrondissement">Arr.</button>
-              <button type="button" class="level-btn active" data-level="quartier">Quartier</button>
-              <button type="button" class="level-btn" data-level="iris">IRIS</button>
+              <button type="button" class="level-btn" data-level="arrondissement" aria-pressed="false">Arr.</button>
+              <button type="button" class="level-btn active" data-level="quartier" aria-pressed="true">Quartier</button>
+              <button type="button" class="level-btn" data-level="iris" aria-pressed="false">IRIS</button>
             </div>
-            <p class="control-help">Le niveau se synchronise aussi avec le zoom de la carte pour faciliter le drill-down.</p>
           </div>
 
+          <!-- Indicateur -->
           <div class="control-group">
             <label class="control-label" for="indicateur-select">
               <svg class="ctrl-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline></svg>
               Indicateur
             </label>
-            <select id="indicateur-select" title="Choisir un indicateur" aria-label="Indicateur à afficher sur la carte">
+            <select id="indicateur-select" title="Choisir un indicateur" aria-label="Indicateur à afficher">
               <option value="score_global">Score global</option>
               <option value="score_qualite_vie">Qualité de vie</option>
               <option value="score_transports">Transports</option>
               <option value="score_loisirs">Loisirs</option>
               <option value="score_services">Services publics</option>
-              <option value="prix_m2_median">Prix m² médian</option>
               <option value="nb_logements_sociaux">Logements sociaux</option>
             </select>
           </div>
 
+          <!-- Année -->
           <div class="control-group">
             <label class="control-label" for="annee-slider">
               <svg class="ctrl-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="3" y="4" width="18" height="18" rx="2"></rect><line x1="16" y1="2" x2="16" y2="6"></line><line x1="8" y1="2" x2="8" y2="6"></line><line x1="3" y1="10" x2="21" y2="10"></line></svg>
-              Année : <span id="annee-label" class="annee-badge">2026</span>
+              Année
+              <span id="annee-label" class="annee-badge">2026</span>
             </label>
             <input type="range" id="annee-slider" min="2021" max="2026" value="2026" step="1"
               aria-label="Année des données" aria-valuemin="2021" aria-valuemax="2026" aria-valuenow="2026" />
             <div class="slider-ticks" aria-hidden="true"><span>2021</span><span>2026</span></div>
-            <p class="control-help" id="annee-help">
-              Aujourd’hui, l’historique varie surtout sur l’immobilier. Les autres scores restent majoritairement des snapshots annuels propagés.
-            </p>
           </div>
 
+          <!-- Recherche de zone -->
+          <div class="control-group">
+            <label class="control-label" for="zone-search-input">
+              <svg class="ctrl-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><polygon points="3 11 22 2 13 21 11 13 3 11"></polygon></svg>
+              Recherche de zone
+            </label>
+            <div class="zone-search-box">
+              <input id="zone-search-input" type="text" placeholder="Quartier, arrondissement…" autocomplete="off"
+                aria-label="Rechercher une zone par nom" aria-autocomplete="list" aria-controls="zone-search-results" />
+              <ul id="zone-search-results" class="autocomplete-list hidden" role="listbox" aria-label="Zones correspondantes"></ul>
+            </div>
+          </div>
+
+          <!-- Recherche d'adresse -->
           <div class="control-group">
             <label class="control-label" for="geocode-input">
               <svg class="ctrl-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
@@ -109,6 +124,7 @@
             </div>
           </div>
 
+          <!-- Couches de points -->
           <div class="control-group">
             <label class="control-label">
               <svg class="ctrl-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="3"></circle><path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83"></path></svg>
@@ -140,7 +156,6 @@
                 <span class="point-dot" style="background:#14b8a6"></span>Bibliothèques
               </label>
             </div>
-            <p class="control-help">Les points n’apparaissent sur la carte que lorsque la couche correspondante est activée.</p>
           </div>
 
           <button id="compare-btn" type="button" class="btn-compare">
@@ -149,7 +164,15 @@
           </button>
         </div>
 
-        <!-- Divider -->
+        <!-- Zones favorites -->
+        <div id="favorites-section" class="favorites-section hidden">
+          <div class="sidebar-divider" aria-label="Zones favorites">
+            <span>Zones favorites</span>
+          </div>
+          <div id="favorites-list" class="favorites-list" aria-label="Liste des zones favorites"></div>
+        </div>
+
+        <!-- Divider résultats -->
         <div class="sidebar-divider" aria-hidden="true">
           <span>Résultats</span>
         </div>
@@ -158,8 +181,13 @@
         <div id="sidebar-results">
           <div id="sidebar-content">
             <div class="sidebar-placeholder">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>
+              <div class="placeholder-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+                  <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
+                </svg>
+              </div>
               <p>Cliquez sur une zone<br/>pour explorer ses données</p>
+              <small>ou utilisez la recherche ci-dessus</small>
             </div>
           </div>
         </div>
@@ -203,12 +231,12 @@
     <div class="compare-selects">
       <div class="compare-side">
         <select id="compare-arr1" title="Premier arrondissement" aria-label="Premier arrondissement à comparer"></select>
-        <select id="compare-quartier1" title="Premier quartier administratif" aria-label="Premier quartier administratif à comparer"></select>
+        <select id="compare-quartier1" title="Premier quartier administratif" aria-label="Premier quartier à comparer"></select>
       </div>
       <span class="vs-badge" aria-hidden="true">vs</span>
       <div class="compare-side">
         <select id="compare-arr2" title="Deuxième arrondissement" aria-label="Deuxième arrondissement à comparer"></select>
-        <select id="compare-quartier2" title="Deuxième quartier administratif" aria-label="Deuxième quartier administratif à comparer"></select>
+        <select id="compare-quartier2" title="Deuxième quartier administratif" aria-label="Deuxième quartier à comparer"></select>
       </div>
       <button type="button" id="compare-go" class="btn-primary">Comparer</button>
     </div>
@@ -224,16 +252,18 @@
     <div id="compare-table" role="region" aria-label="Tableau de comparaison"></div>
   </div>
 
+  <!-- Auth overlay -->
   <div id="auth-overlay" class="auth-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="auth-title">
     <div class="auth-card">
-      <div class="auth-kicker">API securisee</div>
+      <div class="auth-logo">LBP</div>
+      <div class="auth-kicker">Accès sécurisé JWT</div>
       <h1 id="auth-title">Connexion requise</h1>
-      <p class="auth-copy">Le dashboard charge maintenant les donnees uniquement avec un jeton JWT valide.</p>
+      <p class="auth-copy">Entrez vos identifiants pour accéder au dashboard d'analyse urbaine de Paris.</p>
       <form id="auth-form" class="auth-form">
         <label for="auth-username">Utilisateur</label>
-        <input id="auth-username" name="username" type="text" autocomplete="username" required />
+        <input id="auth-username" name="username" type="text" autocomplete="username" required placeholder="Votre identifiant" />
         <label for="auth-password">Mot de passe</label>
-        <input id="auth-password" name="password" type="password" autocomplete="current-password" required />
+        <input id="auth-password" name="password" type="password" autocomplete="current-password" required placeholder="••••••••" />
         <p id="auth-error" class="auth-error hidden" aria-live="polite"></p>
         <button type="submit" class="btn-primary auth-submit">Se connecter</button>
       </form>
