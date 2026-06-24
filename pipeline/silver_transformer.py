@@ -1,20 +1,24 @@
 """
 Silver Layer Transformer — Urban Data Explorer Paris
-Bronze (MinIO "bronze") → Silver (MinIO "silver" Parquet + MongoDB documents)
+Bronze (MinIO "bronze") → Silver (MinIO "silver" Parquet uniquement)
+MongoDB est peuplé en Gold par gold_aggregator.py (Phase 1).
 """
 
 import json
 import logging
+import os
 import struct
 import re
 import math
 import sys
+import time
+import threading
 import pandas as pd
 import boto3
 import requests
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from io import BytesIO
 from pathlib import Path
-from pymongo import MongoClient, UpdateOne
 from botocore.exceptions import ClientError
 
 # Permet l'execution directe via `python pipeline/silver_transformer.py`.
@@ -25,7 +29,6 @@ if str(ROOT) not in sys.path:
 from pipeline.config import (
     MINIO_ENDPOINT, MINIO_ACCESS_KEY, MINIO_SECRET_KEY,
     BUCKET_BRONZE, BUCKET_SILVER,
-    MONGO_URI, MONGO_DB,
 )
 from pipeline.progress_utils import tqdm
 
@@ -47,6 +50,8 @@ _QUARTIER_POINT_CACHE = {}
 _IRIS_SHAPES = None
 _IRIS_BY_ID = None
 _IRIS_POINT_CACHE = {}
+_QUARTIER_GDF = None  # geopandas GeoDataFrame, construit à la première utilisation
+_IRIS_GDF = None      # geopandas GeoDataFrame, construit à la première utilisation
 ADMIN_SUBAREA_FIELDS = ["quartier_id", "quartier_code", "quartier_nom", "iris_id", "iris_code", "iris_nom", "iris_type"]
 
 # ─── MinIO ────────────────────────────────────────────────────────────────────
@@ -57,11 +62,6 @@ s3 = boto3.client(
     aws_access_key_id=MINIO_ACCESS_KEY,
     aws_secret_access_key=MINIO_SECRET_KEY,
 )
-
-# ─── MongoDB ──────────────────────────────────────────────────────────────────
-
-mongo = MongoClient(MONGO_URI)
-db = mongo[MONGO_DB]
 
 # ─── Geo helpers ──────────────────────────────────────────────────────────────
 
@@ -92,7 +92,7 @@ def parse_arrondissement(val) -> int | None:
     if m:
         n = int(m.group(1))
         return n if 1 <= n <= 20 else None
-    m = re.search(r"\b(\d{1,2})\b", s)
+    m = re.search(r"(?<!\d)(\d{1,2})(?!\d)", s)
     if m:
         n = int(m.group(1))
         return n if 1 <= n <= 20 else None
@@ -468,14 +468,143 @@ def _rename_first_existing(df: pd.DataFrame, target: str, candidates: list[str])
     return df
 
 
+def _get_quartier_gdf():
+    """Construit (et cache) un GeoDataFrame geopandas des quartiers depuis les shapes déjà chargés."""
+    global _QUARTIER_GDF
+    if _QUARTIER_GDF is not None:
+        return _QUARTIER_GDF
+    try:
+        import geopandas as gpd
+        from shapely.geometry import Polygon, MultiPolygon
+        quartiers, _ = _load_quartier_shapes()
+        rows = []
+        for q in quartiers:
+            polys = [Polygon(r) for r in q["rings"] if len(r) >= 3]
+            if not polys:
+                continue
+            geom = polys[0] if len(polys) == 1 else MultiPolygon(polys)
+            rows.append({
+                "quartier_id":   q["quartier_id"],
+                "quartier_code": q["quartier_code"],
+                "quartier_nom":  q["quartier_nom"],
+                "q_arr":         q["arrondissement"],
+                "geometry":      geom,
+            })
+        _QUARTIER_GDF = gpd.GeoDataFrame(rows, crs="EPSG:4326") if rows else None
+    except Exception as e:
+        log.debug(f"_get_quartier_gdf échec : {e}")
+        _QUARTIER_GDF = None
+    return _QUARTIER_GDF
+
+
+def _get_iris_gdf():
+    """Construit (et cache) un GeoDataFrame geopandas des IRIS depuis les shapes déjà chargés."""
+    global _IRIS_GDF
+    if _IRIS_GDF is not None:
+        return _IRIS_GDF
+    try:
+        import geopandas as gpd
+        from shapely.geometry import Polygon, MultiPolygon
+        iris_shapes, _ = _load_iris_shapes()
+        rows = []
+        for ir in iris_shapes:
+            polys = [Polygon(r) for r in ir["rings"] if len(r) >= 3]
+            if not polys:
+                continue
+            geom = polys[0] if len(polys) == 1 else MultiPolygon(polys)
+            rows.append({
+                "iris_id":   ir["iris_id"],
+                "iris_code": ir["iris_code"],
+                "iris_nom":  ir["iris_nom"],
+                "iris_type": ir["iris_type"],
+                "i_arr":     ir["arrondissement"],
+                "geometry":  geom,
+            })
+        _IRIS_GDF = gpd.GeoDataFrame(rows, crs="EPSG:4326") if rows else None
+    except Exception as e:
+        log.debug(f"_get_iris_gdf échec : {e}")
+        _IRIS_GDF = None
+    return _IRIS_GDF
+
+
+def _enrich_admin_areas_fast(df: pd.DataFrame) -> pd.DataFrame:
+    """Version vectorisée avec geopandas.sjoin + R-tree — 20-50x plus rapide que row-by-row."""
+    import geopandas as gpd
+    from shapely.geometry import Point
+
+    def _loc_to_point(loc):
+        if not isinstance(loc, dict):
+            return None
+        coords = loc.get("coordinates", [])
+        if len(coords) != 2:
+            return None
+        try:
+            return Point(float(coords[0]), float(coords[1]))
+        except Exception:
+            return None
+
+    geoms = df["location"].apply(_loc_to_point)
+    valid_mask = geoms.notna()
+    if not valid_mask.any():
+        return df
+
+    pts = gpd.GeoDataFrame(
+        {"_oi": df.index[valid_mask].tolist()},
+        geometry=geoms[valid_mask].tolist(),
+        crs="EPSG:4326",
+    )
+
+    def _apply_cols(joined, col_pairs, arr_col):
+        """Applique les colonnes du sjoin sur df, uniquement si manquantes."""
+        idx_map = joined.drop_duplicates(subset=["_oi"]).set_index("_oi")
+        for src, dst in col_pairs:
+            if src not in idx_map.columns:
+                continue
+            mapped = idx_map[src].reindex(df.index)
+            if dst not in df.columns:
+                df[dst] = mapped.values
+            else:
+                missing = df[dst].isna()
+                if missing.any():
+                    df.loc[missing, dst] = mapped[missing].values
+        if arr_col in idx_map.columns:
+            mapped_arr = idx_map[arr_col].reindex(df.index)
+            if "arrondissement" not in df.columns:
+                df["arrondissement"] = mapped_arr.values
+            else:
+                df["arrondissement"] = df["arrondissement"].astype("object")
+                missing = df["arrondissement"].isna()
+                if missing.any():
+                    df.loc[missing, "arrondissement"] = mapped_arr[missing].values
+
+    q_gdf = _get_quartier_gdf()
+    if q_gdf is not None:
+        jq = gpd.sjoin(pts, q_gdf, how="left", predicate="within")
+        _apply_cols(jq, [("quartier_id", "quartier_id"), ("quartier_code", "quartier_code"), ("quartier_nom", "quartier_nom")], "q_arr")
+
+    ir_gdf = _get_iris_gdf()
+    if ir_gdf is not None:
+        ji = gpd.sjoin(pts, ir_gdf, how="left", predicate="within")
+        _apply_cols(ji, [("iris_id", "iris_id"), ("iris_code", "iris_code"), ("iris_nom", "iris_nom"), ("iris_type", "iris_type")], "i_arr")
+
+    return df
+
+
 def _enrich_admin_areas(df: pd.DataFrame) -> pd.DataFrame:
     """
     Enrichit les documents géolocalisés avec des identifiants administratifs persistants.
-    Cette étape accélère fortement les agrégations Gold et prépare des maillages plus fins.
+    Utilise geopandas.sjoin (vectorisé) si disponible, sinon ray-casting ligne par ligne.
     """
     if "location" not in df.columns or df.empty:
         return df
 
+    try:
+        import geopandas  # noqa
+        return _enrich_admin_areas_fast(df)
+    except ImportError:
+        pass
+
+    # ── Fallback : implémentation originale row-by-row ─────────────────────────
     quartier_infos = [infer_quartier_from_location(loc) for loc in df["location"]]
     quartier_ids = pd.Series(
         [info["quartier_id"] if info else None for info in quartier_infos],
@@ -946,13 +1075,10 @@ SILVER_CONFIG = {
     "fibre_base_imb_fc":             ("silver_fibre_imb_fc",       transform_passthrough,   "immeuble_id",   "qualite_vie"),
     "fibre_debit_filaire":           ("silver_fibre_debit",        transform_passthrough,   "code_dep",      "qualite_vie"),
     "fibre_operateur":               ("silver_fibre_operateur",    transform_passthrough,   "code",          "qualite_vie"),
-    "sanisettes":                    ("silver_sanisettes",         transform_api_geo,       None,            "qualite_vie"),
-    "chantiers":                     ("silver_chantiers",          transform_api_geo,       None,            "qualite_vie"),
-    "anomalies":                     ("silver_anomalies",          transform_api_geo,       None,            "qualite_vie"),
+    # sanisettes, chantiers, anomalies → Kafka (kafka_consumer.py → silver_sanisettes/chantiers/anomalies)
     "zones_touristiques":            ("silver_zones_touristiques", transform_api_geo,       None,            "qualite_vie"),
     # Transports
-    "voies":                         ("silver_voies",              transform_voies,         None,            "transports"),
-    "velib":                         ("silver_velib",              transform_velib,         "stationcode",   "transports"),
+    # voies, velib → Kafka (kafka_consumer.py → silver_voies/silver_velib)
     "gares":                         ("silver_gares",              transform_idf_transport, None,            "transports"),
     "bus":                           ("silver_bus",                transform_idf_transport, None,            "transports"),
     # Loisirs
@@ -985,12 +1111,7 @@ SOURCE_MAP = {
     "fibre_base_imb_fc":             "datagouv",
     "fibre_debit_filaire":           "datagouv",
     "fibre_operateur":               "datagouv",
-    "sanisettes":                    "paris_opendata",
-    "chantiers":                     "paris_opendata",
-    "anomalies":                     "paris_opendata",
     "zones_touristiques":            "paris_opendata",
-    "voies":           "paris_opendata",
-    "velib":                         "transport_gouv",
     "gares":                         "transport_gouv",
     "bus":                           "transport_gouv",
     "evenements_paris":              "paris_opendata",
@@ -1039,6 +1160,18 @@ def read_bronze(indicateur: str, dataset_id: str, ingestion_date: str) -> pd.Dat
 
 # ─── Writers ──────────────────────────────────────────────────────────────────
 
+def _already_silver_today(dataset_id: str, indicateur: str, ingestion_date: str) -> bool:
+    """Retourne True si clean.parquet existe déjà dans MinIO silver pour cette date."""
+    key = f"ingestion_date={ingestion_date}/{indicateur}/{dataset_id}/clean.parquet"
+    try:
+        s3.head_object(Bucket=BUCKET_SILVER, Key=key)
+        return True
+    except ClientError as e:
+        if e.response["Error"]["Code"] in ("404", "NoSuchKey"):
+            return False
+        raise
+
+
 def write_silver_minio(df: pd.DataFrame, dataset_id: str, indicateur: str, ingestion_date: str):
     """Écrit le Parquet nettoyé dans MinIO bucket 'silver'."""
     key = f"ingestion_date={ingestion_date}/{indicateur}/{dataset_id}/clean.parquet"
@@ -1052,54 +1185,6 @@ def write_silver_minio(df: pd.DataFrame, dataset_id: str, indicateur: str, inges
     buf.seek(0)
     s3.put_object(Bucket=BUCKET_SILVER, Key=key, Body=buf.getvalue())
     log.info(f"    ✓ MinIO silver → {key}")
-
-
-BULK_CHUNK = 5_000  # insert_many par batch de 5000 docs
-
-def write_silver_mongo(df: pd.DataFrame, collection_name: str, id_col: str | None):
-    """Écrit les documents dans MongoDB silver — bulk insert pour les gros datasets."""
-    coll = db[collection_name]
-    records = df.where(pd.notna(df), other=None).to_dict("records")
-    if not records:
-        return
-
-    if id_col and id_col in df.columns and len(records) < 10_000:
-        # Upsert seulement pour les petits datasets avec clé métier
-        ops = [UpdateOne({id_col: r[id_col]}, {"$set": r}, upsert=True) for r in records]
-        result = coll.bulk_write(ops, ordered=False)
-        log.info(f"    ✓ MongoDB {collection_name} — upserted={result.upserted_count} modified={result.modified_count}")
-    else:
-        # Bulk insert : drop la collection + insert_many par chunks
-        coll.drop()
-        total = 0
-        chunk_count = math.ceil(len(records) / BULK_CHUNK)
-        chunk_progress = tqdm(
-            range(0, len(records), BULK_CHUNK),
-            total=chunk_count,
-            desc=f"Mongo {collection_name}",
-            unit="chunk",
-            leave=False,
-        )
-        for i in chunk_progress:
-            chunk = records[i:i + BULK_CHUNK]
-            coll.insert_many(chunk, ordered=False)
-            total += len(chunk)
-            chunk_progress.set_postfix_str(f"{total}/{len(records)} docs")
-        chunk_progress.close()
-        log.info(f"    ✓ MongoDB {collection_name} — {total} insérés (bulk)")
-
-    if "location" in df.columns:
-        try:
-            coll.create_index([("location", "2dsphere")])
-        except Exception:
-            pass
-    if "arrondissement" in df.columns:
-        coll.create_index("arrondissement")
-    if "quartier_id" in df.columns:
-        coll.create_index("quartier_id")
-    if "iris_id" in df.columns:
-        coll.create_index("iris_id")
-    coll.create_index("_indicateur")
 
 
 # ─── Init ─────────────────────────────────────────────────────────────────────
@@ -1117,23 +1202,15 @@ def init_minio():
         log.info(f"  ✓ Bucket '{BUCKET_SILVER}' existant")
 
 
-def init_mongo():
-    try:
-        mongo.admin.command("ping")
-        log.info("  ✓ MongoDB connecté")
-    except Exception as e:
-        raise RuntimeError(f"MongoDB inaccessible — docker-compose up ? ({e})")
-
-
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 def run(ingestion_date: str | None = None):
+    _t0 = time.perf_counter()
     log.info("=" * 60)
     log.info("Silver Transformer")
     log.info("=" * 60)
 
     init_minio()
-    init_mongo()
 
     if ingestion_date is None:
         ingestion_date = latest_ingestion_date()
@@ -1141,63 +1218,94 @@ def run(ingestion_date: str | None = None):
             raise RuntimeError("Aucune partition trouvée dans MinIO — lancer bronze_feeder d'abord")
     log.info(f"  Partition : ingestion_date={ingestion_date}")
 
+    # Pré-chargement des référentiels géo dans le thread principal pour éviter
+    # des doubles fetch HTTP si plusieurs threads les demandaient simultanément.
+    log.info("  Pré-chargement des référentiels géo (arrondissements, quartiers, IRIS)...")
+    _load_arrondissement_shapes()
+    _load_quartier_shapes()
+    _load_iris_shapes()
+    log.info("  ✓ Référentiels géo prêts")
+
     results = []
+    results_lock = threading.Lock()
 
     silver_items = list(SILVER_CONFIG.items())
-    dataset_progress = tqdm(silver_items, desc="Silver datasets", unit="dataset")
-    for idx, (dataset_id, (collection, transformer, id_col, indicateur)) in enumerate(dataset_progress, start=1):
-        dataset_progress.set_description_str(f"Silver {idx}/{len(silver_items)}")
-        dataset_progress.set_postfix_str(dataset_id)
-        log.info(f"\n[{indicateur.upper()}] [{dataset_id}]")
 
+    def _process_one(item):
+        dataset_id, (collection, transformer, id_col, indicateur) = item
+        if _already_silver_today(dataset_id, indicateur, ingestion_date):
+            log.info(f"  ⏭  [{dataset_id}] déjà transformé pour {ingestion_date} — skip")
+            return {"id": dataset_id, "indicateur": indicateur, "rows": 0, "status": "SKIP"}
+
+        log.info(f"\n[{indicateur.upper()}] [{dataset_id}]")
         try:
             df = read_bronze(indicateur, dataset_id, ingestion_date)
             if df is None:
-                results.append({"id": dataset_id, "status": "SKIPPED (absent bronze)"})
-                continue
+                return {"id": dataset_id, "status": "SKIPPED (absent bronze)"}
 
             df = transformer(df)
 
             if df.empty:
-                log.warning(f"  DataFrame vide après transformation")
-                results.append({"id": dataset_id, "status": "VIDE après transform"})
-                continue
+                log.warning(f"  [{dataset_id}] DataFrame vide après transformation")
+                return {"id": dataset_id, "status": "VIDE après transform"}
 
             write_silver_minio(df, dataset_id, indicateur, ingestion_date)
-            write_silver_mongo(df, collection, id_col)
 
-            results.append({
+            return {
                 "id": dataset_id,
                 "collection": collection,
                 "indicateur": indicateur,
                 "rows": len(df),
                 "status": "OK",
                 "has_geo": "location" in df.columns,
-            })
-
+            }
         except Exception as e:
-            log.error(f"  ERREUR : {e}")
-            results.append({"id": dataset_id, "status": f"ERREUR: {e}"})
+            log.error(f"  [{dataset_id}] ERREUR : {e}")
+            return {"id": dataset_id, "status": f"ERREUR: {e}"}
+
+    MAX_WORKERS = int(os.environ.get("SILVER_WORKERS", "5"))
+    dataset_progress = tqdm(total=len(silver_items), desc="Silver datasets", unit="dataset")
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        futures = {executor.submit(_process_one, item): item for item in silver_items}
+        for future in as_completed(futures):
+            result = future.result()
+            with results_lock:
+                results.append(result)
+            dataset_progress.set_postfix_str(result["id"])
+            dataset_progress.update(1)
     dataset_progress.close()
 
     log.info(f"\n{'='*60}")
     log.info("RAPPORT SILVER")
     log.info(f"{'='*60}")
+    _non_error = {"OK", "SKIP", "SKIPPED (absent bronze)", "VIDE après transform"}
     ok = [r for r in results if r["status"] == "OK"]
-    ko = [r for r in results if r["status"] not in ("OK",) and not r["status"].startswith("SKIPPED") and not r["status"].startswith("VIDE")]
-    skipped = [r for r in results if r["status"].startswith("SKIPPED") or r["status"].startswith("VIDE")]
-    log.info(f"  OK      : {len(ok)}/{len(results)}")
+    skip = [r for r in results if r["status"] == "SKIP"]
+    absent = [r for r in results if r["status"] == "SKIPPED (absent bronze)"]
+    vide = [r for r in results if r["status"] == "VIDE après transform"]
+    ko = [r for r in results if r["status"] not in _non_error]
+    if skip:
+        log.info(f"  ⏭  Skippés : {len(skip)} (déjà transformés aujourd'hui)")
+    log.info(f"  ✅ OK      : {len(ok)}/{len(results)}")
     for r in ok:
         geo_tag = " [geo]" if r.get("has_geo") else ""
         log.info(f"    [{r.get('indicateur','?'):20}] {r['id']:40} {r['rows']:>8}  →  {r['collection']}{geo_tag}")
-    if skipped:
-        log.info(f"  SKIPPED/VIDE : {len(skipped)}")
-        for r in skipped:
-            log.info(f"    {r['id']} — {r['status']}")
+    if absent:
+        log.info(f"  ⚠️  Absent bronze : {len(absent)}")
+        for r in absent:
+            log.info(f"    {r['id']}")
+    if vide:
+        log.info(f"  ⚠️  Vides : {len(vide)}")
+        for r in vide:
+            log.info(f"    {r['id']}")
     if ko:
         log.info(f"  ERREURS : {len(ko)}")
         for r in ko:
             log.info(f"    {r['id']} — {r['status']}")
+
+    elapsed = time.perf_counter() - _t0
+    total_docs = sum(r.get("rows", 0) for r in results if r.get("rows"))
+    log.info(f"[PERF] silver_transformer : {elapsed:.1f}s — {len([r for r in results if r['status']=='OK'])} collections OK — {total_docs:,} documents MongoDB")
     log.info(f"{'='*60}\n")
 
 

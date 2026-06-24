@@ -11,15 +11,21 @@ tqdm>=4.66.0
 sqlalchemy>=2.0.0
 psycopg2-binary>=2.9.0
 geoalchemy2>=0.14.0
+geopandas>=0.14.0
 
 # API
 fastapi>=0.110.0
 uvicorn[standard]>=0.27.0
 pydantic>=2.6.0
 
-# Scheduler
+# Scheduler batch
 APScheduler>=3.10.0
+
+# Streaming Kafka
+kafka-python-ng>=2.2.3
 
 # Dev
 python-dotenv>=1.0.0
 python-jose[cryptography]>=3.3.0
+tenacity>=8.2.0
+pytest>=8.0.0
