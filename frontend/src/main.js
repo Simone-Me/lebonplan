@@ -2,6 +2,7 @@ import "maplibre-gl/dist/maplibre-gl.css";
 import {
   initMap,
   updateMapData,
+  updateMapDataDelta,
   setMapTheme,
   getIndicatorScale,
   clearCompareHighlights,
@@ -35,6 +36,8 @@ let currentLevel = "quartier";
 let hasLoadedData = false;
 let currentAreaSelection = null;
 let geoJSONCache = { arrondissement: null, quartier: null, iris: null };
+let isEvolutionMode = false;
+let evolutionDeltaFeatures = null;
 
 const LEVEL_ORDER = {
   arrondissement: 0,
@@ -99,11 +102,17 @@ async function refreshMap(prefetchedGeojson = null) {
   try {
     const geojson = prefetchedGeojson || await fetchGeoJSON(currentAnnee, currentIndicateur, currentLevel);
     setSelectionGeoJSONCache(currentLevel, geojson);
-    currentScale =
-      updateMapData(geojson, currentIndicateur, INDICATEUR_LABELS[currentIndicateur], currentLevel) ??
-      currentScale;
-    updateLegend();
-    updateRanking();
+
+    if (isEvolutionMode) {
+      await applyEvolutionMode();
+    } else {
+      currentScale =
+        updateMapData(geojson, currentIndicateur, INDICATEUR_LABELS[currentIndicateur], currentLevel) ??
+        currentScale;
+      updateLegend();
+      updateRanking();
+    }
+
     if (currentAreaSelection?.level === currentLevel) {
       syncSelectionFromArea(currentAreaSelection);
       openSidebar(currentAreaSelection, currentAnnee, getIndicatorScale, currentAreaSelection.level);
@@ -189,20 +198,27 @@ function getRankingIdField(level) {
   return "quartier_id";
 }
 
-function renderRankingItems(listId, items, type) {
+function renderRankingItems(listId, items, type, isDelta = false) {
   const list = document.getElementById(listId);
   if (!list) return;
   if (!items.length) {
     list.innerHTML = `<li class="ranking-empty">—</li>`;
     return;
   }
-  list.innerHTML = items.map((item, i) => `
-    <li class="ranking-item" data-idx="${i}" role="button" tabindex="0"
+  list.innerHTML = items.map((item, i) => {
+    let displayVal;
+    if (isDelta) {
+      displayVal = formatPrixDelta(item.value);
+    } else {
+      displayVal = formatLegendValue(item.value);
+    }
+    return `<li class="ranking-item" data-idx="${i}" role="button" tabindex="0"
         aria-label="Aller à ${item.nom}">
       <span class="ranking-rank">${i + 1}</span>
       <span class="ranking-name" title="${item.nom}">${item.nom}</span>
-      <span class="ranking-value ${type}">${formatLegendValue(item.value)}</span>
-    </li>`).join("");
+      <span class="ranking-value ${type}">${displayVal}</span>
+    </li>`;
+  }).join("");
 
   list.querySelectorAll(".ranking-item").forEach((li) => {
     const idx = +li.dataset.idx;
@@ -216,23 +232,40 @@ function renderRankingItems(listId, items, type) {
 
 function updateRanking() {
   const nameEl = document.getElementById("ranking-indicator-name");
+
+  if (isEvolutionMode && evolutionDeltaFeatures) {
+    if (nameEl) nameEl.textContent = `Δ ${EVOLUTION_LABEL}`;
+
+    const withDeltas = evolutionDeltaFeatures
+      .map((f) => ({
+        nom:     f.properties?.nom || "—",
+        value:   f.properties?.__delta ?? NaN,
+        feature: f,
+      }))
+      .filter((item) => !Number.isNaN(item.value) && item.value != null);
+
+    if (!withDeltas.length) return;
+    withDeltas.sort((a, b) => a.value - b.value); // ascending : baisses en tête
+
+    renderRankingItems("ranking-top",  withDeltas.slice(0, 5), "top", true);
+    renderRankingItems("ranking-flop", [...withDeltas].slice(-5).reverse(), "flop", true);
+    return;
+  }
+
   if (nameEl) nameEl.textContent = INDICATEUR_LABELS[currentIndicateur] || currentIndicateur;
 
   const cache = geoJSONCache[currentLevel];
   if (!cache?.features?.length) return;
 
-  const idField = getRankingIdField(currentLevel);
   const withValues = cache.features
     .map((f) => ({
-      nom: f.properties?.nom || "—",
-      value: f.properties?.[currentIndicateur] != null ? Number(f.properties[currentIndicateur]) : NaN,
-      id: f.properties?.[idField],
+      nom:     f.properties?.nom || "—",
+      value:   f.properties?.[currentIndicateur] != null ? Number(f.properties[currentIndicateur]) : NaN,
       feature: f,
     }))
     .filter((item) => !Number.isNaN(item.value));
 
   if (!withValues.length) return;
-
   withValues.sort((a, b) => b.value - a.value);
 
   renderRankingItems("ranking-top",  withValues.slice(0, 5), "top");
@@ -248,6 +281,103 @@ function initRanking() {
     toggle.classList.toggle("collapsed", collapsed);
     toggle.title = collapsed ? "Développer" : "Réduire";
     toggle.setAttribute("aria-label", collapsed ? "Développer le classement" : "Réduire le classement");
+  });
+}
+
+/* ── Evolution mode (Prix m² médian) ─────────────────────────────── */
+const EVOLUTION_FIELD = "prix_m2_median";
+const EVOLUTION_LABEL = "Prix m² médian";
+
+function formatPrixDelta(value) {
+  if (!Number.isFinite(value)) return "—";
+  const sign = value >= 0 ? "+" : "";
+  return `${sign}${Math.round(value).toLocaleString("fr-FR")} €/m²`;
+}
+
+function updateLegendDelta(fromYear, toYear) {
+  document.getElementById("legend-title").textContent = `Δ ${EVOLUTION_LABEL}`;
+  const gradient = document.getElementById("legend-gradient");
+  gradient.classList.add("legend-gradient-delta");
+  gradient.style.background = "";
+  document.getElementById("legend-min").textContent = formatPrixDelta(currentScale.min);
+  document.getElementById("legend-max").textContent = formatPrixDelta(currentScale.max);
+  const note = document.getElementById("legend-note");
+  if (note) note.textContent = `${fromYear} → ${toYear} · Rouge = hausse · Vert = baisse`;
+}
+
+async function applyEvolutionMode() {
+  const fromYear = +document.getElementById("evolution-from-year").value;
+  const toYear   = currentAnnee;
+
+  document.getElementById("evolution-to-label").textContent = toYear;
+  if (fromYear === toYear) return;
+
+  const [geojson1, geojson2] = await Promise.all([
+    fetchGeoJSON(fromYear, currentIndicateur, currentLevel),
+    fetchGeoJSON(toYear,   currentIndicateur, currentLevel),
+  ]);
+
+  currentScale = updateMapDataDelta(
+    geojson1, geojson2,
+    EVOLUTION_FIELD,
+    EVOLUTION_LABEL,
+    currentLevel,
+  ) ?? currentScale;
+
+  const idField = getRankingIdField(currentLevel);
+  const v1Map = new Map(
+    geojson1.features.map((g) => [
+      String(g.properties?.[idField] ?? ""),
+      g.properties?.[EVOLUTION_FIELD] != null ? Number(g.properties[EVOLUTION_FIELD]) : NaN,
+    ])
+  );
+  evolutionDeltaFeatures = geojson2.features.map((f) => {
+    const id    = String(f.properties?.[idField] ?? "");
+    const v2    = f.properties?.[EVOLUTION_FIELD] != null ? Number(f.properties[EVOLUTION_FIELD]) : NaN;
+    const v1    = v1Map.get(id) ?? NaN;
+    const delta = Number.isFinite(v1) && Number.isFinite(v2) ? v2 - v1 : null;
+    return { ...f, properties: { ...f.properties, __delta: delta } };
+  });
+
+  updateLegendDelta(fromYear, toYear);
+  updateRanking();
+}
+
+function exitEvolutionMode() {
+  isEvolutionMode        = false;
+  evolutionDeltaFeatures = null;
+  const btn = document.getElementById("evolution-btn");
+  const controls = document.getElementById("evolution-controls");
+  btn?.classList.remove("active");
+  btn?.setAttribute("aria-pressed", "false");
+  controls?.classList.add("hidden");
+  document.getElementById("legend-gradient")?.classList.remove("legend-gradient-delta");
+  refreshMap();
+}
+
+function initEvolution() {
+  const btn      = document.getElementById("evolution-btn");
+  const controls = document.getElementById("evolution-controls");
+  const fromSel  = document.getElementById("evolution-from-year");
+  const toLabel  = document.getElementById("evolution-to-label");
+  if (!btn || !controls || !fromSel) return;
+
+  toLabel.textContent = currentAnnee;
+
+  btn.addEventListener("click", async () => {
+    if (isEvolutionMode) {
+      exitEvolutionMode();
+    } else {
+      isEvolutionMode = true;
+      btn.classList.add("active");
+      btn.setAttribute("aria-pressed", "true");
+      controls.classList.remove("hidden");
+      await applyEvolutionMode();
+    }
+  });
+
+  fromSel.addEventListener("change", async () => {
+    if (isEvolutionMode) await applyEvolutionMode();
   });
 }
 
@@ -449,6 +579,8 @@ function init() {
   slider.addEventListener("input", () => {
     currentAnnee = +slider.value;
     anneeLabel.textContent = currentAnnee;
+    const toLabel = document.getElementById("evolution-to-label");
+    if (toLabel) toLabel.textContent = currentAnnee;
     hardRefreshCurrentLevel({ preserveSelection: true });
   });
 
@@ -457,6 +589,7 @@ function init() {
   initZoneSearch();
   initFavorites();
   initRanking();
+  initEvolution();
 
   /* Theme toggle — light ↔ dark */
   let isLight = true;

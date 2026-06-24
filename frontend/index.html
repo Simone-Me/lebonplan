@@ -158,6 +158,27 @@
             </div>
           </div>
 
+          <!-- Carte d'évolution temporelle -->
+          <button id="evolution-btn" type="button" class="btn-evolution" aria-pressed="false">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true" width="14" height="14"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline><polyline points="17 6 23 6 23 12"></polyline></svg>
+            Carte d'évolution
+          </button>
+          <div id="evolution-controls" class="evolution-controls hidden" aria-label="Paramètres du mode évolution">
+            <div class="evolution-row">
+              <span class="evolution-label">De</span>
+              <select id="evolution-from-year" aria-label="Année de départ">
+                <option value="2021">2021</option>
+                <option value="2022">2022</option>
+                <option value="2023">2023</option>
+                <option value="2024">2024</option>
+                <option value="2025">2025</option>
+              </select>
+              <span class="evolution-arrow">→</span>
+              <span id="evolution-to-label" class="evolution-to">2026</span>
+            </div>
+            <p class="evolution-hint">Rouge = dégradation · Vert = amélioration</p>
+          </div>
+
           <button id="compare-btn" type="button" class="btn-compare">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M18 3l3 3-3 3"></path><path d="M6 21l-3-3 3-3"></path><line x1="21" y1="6" x2="3" y2="6"></line><line x1="21" y1="18" x2="3" y2="18"></line></svg>
             Comparer deux zones

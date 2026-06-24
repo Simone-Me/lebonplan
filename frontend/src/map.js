@@ -211,6 +211,24 @@ function toNumericOrNaN(value) {
   return value == null ? NaN : Number(value);
 }
 
+function computeDivergingScale(deltas) {
+  const finite = deltas.filter(Number.isFinite);
+  if (!finite.length) return { min: -1, max: 1, steps: [[-1, "#94a3b8"], [0, "#94a3b8"], [1, "#94a3b8"]] };
+  const absMax = Math.max(...finite.map(Math.abs));
+  if (absMax === 0) return { min: -1, max: 1, steps: [[-1, "#94a3b8"], [0, "#94a3b8"], [1, "#94a3b8"]] };
+  return {
+    min: -absMax,
+    max: absMax,
+    steps: dedupeStepValues([
+      [-absMax,        "#10b981"],
+      [-absMax * 0.4,  "#34d399"],
+      [0,              "#cbd5e1"],
+      [absMax * 0.4,   "#fb923c"],
+      [absMax,         "#f43f5e"],
+    ]),
+  };
+}
+
 function getScaleStrategy(indicator) {
   if (!indicator) return "linear";
   if (indicator.startsWith("score_")) return "quantile";
@@ -444,19 +462,34 @@ function attachEvents(onQuartierClick) {
     if (!e.features.length) return;
     map.getCanvas().style.cursor = "pointer";
     const props = e.features[0].properties;
-    const score = props.__score != null ? Number(props.__score).toFixed(1) : "—";
 
     const niveauLabel = currentAreaLevel === "arrondissement"
       ? "Arrondissement"
       : currentAreaLevel === "iris"
         ? "IRIS"
         : "Quartier";
-    const arrStr = props.arrondissement
-      ? ` · ${props.arrondissement}e arr.`
+    const arrStr = props.arrondissement ? ` · ${props.arrondissement}e arr.` : "";
+
+    const isDelta   = !!props.__is_delta;
+    const scoreRaw  = props.__score != null ? Number(props.__score) : null;
+    let scoreText, scoreColor;
+    if (isDelta && scoreRaw != null) {
+      const sign = scoreRaw >= 0 ? "+" : "";
+      scoreText  = `${sign}${Math.round(scoreRaw).toLocaleString("fr-FR")} €/m²`;
+      scoreColor = scoreRaw > 50 ? "#f43f5e" : scoreRaw < -50 ? "#10b981" : "var(--tx-3)";
+    } else {
+      scoreText  = scoreRaw != null ? scoreRaw.toFixed(1) : "—";
+      scoreColor = "var(--ac)";
+    }
+
+    const deltaDetail = isDelta && props.__delta_v1 != null && props.__delta_v2 != null
+      ? `<div style="font-size:10px;color:var(--tx-3);margin-top:2px;text-align:right">
+           ${Math.round(Number(props.__delta_v1)).toLocaleString("fr-FR")} → ${Math.round(Number(props.__delta_v2)).toLocaleString("fr-FR")} €/m²
+         </div>`
       : "";
 
-    const prixRaw = props.prix_m2_median;
-    const prixFormatted = prixRaw != null && !Number.isNaN(Number(prixRaw))
+    const prixRaw       = props.prix_m2_median;
+    const prixFormatted = !isDelta && prixRaw != null && !Number.isNaN(Number(prixRaw))
       ? `${Math.round(Number(prixRaw)).toLocaleString("fr-FR")} €/m²`
       : null;
     const prixRow = prixFormatted
@@ -479,9 +512,9 @@ function attachEvents(onQuartierClick) {
            </div>
            <div style="display:flex;justify-content:space-between;align-items:baseline;gap:10px">
              <span style="font-size:11px;color:var(--tx-2)">${props.__indicateur_label || "Score"}</span>
-             <strong style="font-size:14px;color:var(--ac)">${score}</strong>
+             <strong style="font-size:14px;color:${scoreColor}">${scoreText}</strong>
            </div>
-           ${prixRow}
+           ${deltaDetail}${prixRow}
          </div>`
       )
       .addTo(map);
@@ -610,6 +643,51 @@ export function updateMapData(geojson, indicateur, indicateurLabel, areaLevel = 
   applyCurrentScale();
   applySelectionLayers();
   restoreActivePointLayers();
+  map.triggerRepaint?.();
+
+  return { min: currentScale.min, max: currentScale.max };
+}
+
+export function updateMapDataDelta(geojson1, geojson2, indicateur, indicateurLabel, areaLevel = "quartier") {
+  currentAreaLevel = areaLevel;
+
+  const idField = areaLevel === "arrondissement" ? "arrondissement"
+    : areaLevel === "iris" ? "iris_id"
+    : "quartier_id";
+
+  const lookup1 = new Map();
+  for (const f of geojson1.features) {
+    const id = String(f.properties?.[idField] ?? "");
+    if (id) lookup1.set(id, toNumericOrNaN(f.properties?.[indicateur]));
+  }
+
+  const features = geojson2.features.map((f) => {
+    const id    = String(f.properties?.[idField] ?? "");
+    const v2    = toNumericOrNaN(f.properties?.[indicateur]);
+    const v1    = lookup1.get(id) ?? NaN;
+    const delta = Number.isFinite(v1) && Number.isFinite(v2) ? v2 - v1 : null;
+    return {
+      ...f,
+      properties: {
+        ...f.properties,
+        __score:           delta,
+        __indicateur_label: `Δ ${indicateurLabel}`,
+        __delta_v1:        Number.isFinite(v1) ? v1 : null,
+        __delta_v2:        Number.isFinite(v2) ? v2 : null,
+        __is_delta:        true,
+      },
+    };
+  });
+
+  const deltas  = features.map((f) => toNumericOrNaN(f.properties.__score));
+  currentScale  = computeDivergingScale(deltas);
+  currentGeoJSON = { type: "FeatureCollection", features };
+
+  if (!map || !map.isStyleLoaded()) return { min: currentScale.min, max: currentScale.max };
+  const src = map.getSource("quartiers");
+  if (src) src.setData(currentGeoJSON);
+  applyCurrentScale();
+  applySelectionLayers();
   map.triggerRepaint?.();
 
   return { min: currentScale.min, max: currentScale.max };
