@@ -1,14 +1,13 @@
-import base64
 import hashlib
 import hmac
-import json
 import os
-import time
 from pathlib import Path
 
 from dotenv import load_dotenv
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from jose import JWTError, jwt
+from datetime import datetime, timedelta, timezone
 
 load_dotenv(Path(__file__).parent.parent / ".env")
 
@@ -26,20 +25,6 @@ API_CORS_ORIGINS = os.environ.get(
 bearer_scheme = HTTPBearer(auto_error=False)
 
 
-def _b64url_encode(raw: bytes) -> str:
-    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
-
-
-def _b64url_decode(value: str) -> bytes:
-    padding = "=" * ((4 - len(value) % 4) % 4)
-    return base64.urlsafe_b64decode(value + padding)
-
-
-def _sign(message: bytes) -> str:
-    signature = hmac.new(JWT_SECRET.encode("utf-8"), message, hashlib.sha256).digest()
-    return _b64url_encode(signature)
-
-
 def _pbkdf2_hash(password: str, salt: str, iterations: int) -> str:
     return hashlib.pbkdf2_hmac(
         "sha256",
@@ -50,16 +35,21 @@ def _pbkdf2_hash(password: str, salt: str, iterations: int) -> str:
 
 
 def verify_password(password: str) -> bool:
-    if AUTH_PASSWORD_HASH:
-        try:
-            scheme, iterations, salt, expected = AUTH_PASSWORD_HASH.split("$", 3)
-            if scheme != "pbkdf2_sha256":
-                return False
-            candidate = _pbkdf2_hash(password, salt, int(iterations))
-            return hmac.compare_digest(candidate, expected)
-        except Exception:
+    if not AUTH_PASSWORD_HASH:
+        raise RuntimeError(
+            "API_AUTH_PASSWORD_HASH must be set — plaintext passwords are not allowed. "
+            "Generate a hash with: python -c \"import hashlib,os,hmac; s=os.urandom(16).hex(); "
+            "h=hashlib.pbkdf2_hmac('sha256',b'yourpassword',s.encode(),260000).hex(); "
+            "print(f'pbkdf2_sha256$260000${s}${h}')\""
+        )
+    try:
+        scheme, iterations, salt, expected = AUTH_PASSWORD_HASH.split("$", 3)
+        if scheme != "pbkdf2_sha256":
             return False
-    return hmac.compare_digest(password, AUTH_PASSWORD)
+        candidate = _pbkdf2_hash(password, salt, int(iterations))
+        return hmac.compare_digest(candidate, expected)
+    except Exception:
+        return False
 
 
 def authenticate_user(username: str, password: str) -> bool:
@@ -71,38 +61,24 @@ def get_cors_origins() -> list[str]:
 
 
 def create_access_token(subject: str) -> str:
-    header = {"alg": JWT_ALGORITHM, "typ": "JWT"}
+    expire = datetime.now(timezone.utc) + timedelta(minutes=JWT_EXPIRE_MINUTES)
     payload = {
         "sub": subject,
-        "exp": int(time.time()) + JWT_EXPIRE_MINUTES * 60,
-        "iat": int(time.time()),
+        "exp": expire,
+        "iat": datetime.now(timezone.utc),
     }
-    header_b64 = _b64url_encode(json.dumps(header, separators=(",", ":")).encode("utf-8"))
-    payload_b64 = _b64url_encode(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
-    signing_input = f"{header_b64}.{payload_b64}".encode("utf-8")
-    signature_b64 = _sign(signing_input)
-    return f"{header_b64}.{payload_b64}.{signature_b64}"
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
 
 def decode_access_token(token: str) -> dict:
     try:
-        header_b64, payload_b64, signature_b64 = token.split(".")
-    except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token format") from exc
-
-    signing_input = f"{header_b64}.{payload_b64}".encode("utf-8")
-    expected_signature = _sign(signing_input)
-    if not hmac.compare_digest(expected_signature, signature_b64):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token signature")
-
-    try:
-        payload = json.loads(_b64url_decode(payload_b64))
-    except Exception as exc:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token payload") from exc
-
-    if payload.get("exp", 0) < int(time.time()):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token expired")
-    return payload
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        return payload
+    except JWTError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token invalide ou expiré",
+        ) from exc
 
 
 def require_auth(credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme)) -> dict:
