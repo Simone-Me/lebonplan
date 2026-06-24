@@ -72,6 +72,13 @@ class KPIs(BaseModel):
 
     score_global: Optional[float] = None
 
+    # Année réelle par section (peut différer du slider si fallback)
+    annee_immo:      Optional[int] = None
+    annee_qv:        Optional[int] = None
+    annee_transport: Optional[int] = None
+    annee_loisirs:   Optional[int] = None
+    annee_services:  Optional[int] = None
+
     class Config:
         from_attributes = True
 

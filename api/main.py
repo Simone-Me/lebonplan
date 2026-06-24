@@ -14,7 +14,7 @@ from fastapi import Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from api.routers import auth, geo, kpis, timeline, compare
+from api.routers import auth, geo, kpis, timeline, compare, streaming
 from api.security import get_cors_origins, require_auth
 
 app = FastAPI(
@@ -34,7 +34,8 @@ app.include_router(auth.router,     prefix="/api")
 app.include_router(geo.router,      prefix="/api", tags=["Géo"], dependencies=[Depends(require_auth)])
 app.include_router(kpis.router,     prefix="/api", tags=["KPIs"], dependencies=[Depends(require_auth)])
 app.include_router(timeline.router, prefix="/api", tags=["Timeline"], dependencies=[Depends(require_auth)])
-app.include_router(compare.router,  prefix="/api", tags=["Comparaison"], dependencies=[Depends(require_auth)])
+app.include_router(compare.router,   prefix="/api", tags=["Comparaison"],  dependencies=[Depends(require_auth)])
+app.include_router(streaming.router, prefix="/api", tags=["Streaming"],   dependencies=[Depends(require_auth)])
 
 
 @app.get("/", tags=["Accueil"])
