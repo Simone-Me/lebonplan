@@ -13,15 +13,21 @@ Formats ingérés (RNCP variété) :
 
 import json
 import logging
+import os
 import re
 import sys
+import time
+import threading
 import requests
+from botocore.exceptions import ClientError
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import pandas as pd
 import boto3
 from io import BytesIO
 from pathlib import Path
 from datetime import date
 from tempfile import SpooledTemporaryFile
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 # Permet l'execution directe via `python pipeline/bronze_feeder.py`.
 ROOT = Path(__file__).resolve().parent.parent
@@ -55,6 +61,19 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 log = logging.getLogger("bronze_feeder")
+
+# ─── HTTP retry ───────────────────────────────────────────────────────────────
+
+@retry(
+    retry=retry_if_exception_type((requests.ConnectionError, requests.Timeout, requests.HTTPError)),
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=2, max=10),
+    reraise=True,
+)
+def _http_get_with_retry(url: str, **kwargs) -> requests.Response:
+    r = requests.get(url, **kwargs)
+    r.raise_for_status()
+    return r
 
 # ─── MinIO ────────────────────────────────────────────────────────────────────
 
@@ -156,36 +175,7 @@ DATASETS = [
         "local_file": "operateur.csv",
         "format_source": "csv",
     },
-    {
-        "id": "sanisettes",
-        "label": "Sanisettes publiques",
-        "indicateur": "qualite_vie",
-        "signe": "negatif",
-        "source": "paris_opendata",
-        "api_dataset_id": "sanisettesparis",
-        # "api_max_records": 600,
-        "format_source": "api_opendata",
-    },
-    {
-        "id": "chantiers",
-        "label": "Chantiers à Paris",
-        "indicateur": "qualite_vie",
-        "signe": "negatif",
-        "source": "paris_opendata",
-        "api_dataset_id": "chantiers-a-paris",
-        # "api_max_records": 1000,
-        "format_source": "api_opendata",
-    },
-    {
-        "id": "anomalies",
-        "label": "Dans ma rue — Anomalies signalées",
-        "indicateur": "qualite_vie",
-        "signe": "negatif",
-        "source": "paris_opendata",
-        "api_dataset_id": "dans-ma-rue",
-        # "api_max_records": 2000,
-        "format_source": "api_opendata",
-    },
+    # sanisettes, chantiers, anomalies → Kafka streaming (kafka_producer.py)
     {
         "id": "zones_touristiques",
         "label": "Zones touristiques internationales",
@@ -199,31 +189,7 @@ DATASETS = [
     # ══════════════════════════════════════════════════════════════════════════
     # INDICATEUR 2 — TRANSPORTS
     # ══════════════════════════════════════════════════════════════════════════
-    {
-        "id": "voies",
-        "label": "Comptages multimodaux des passage sur voies de vélo/trottinette/autobus",
-        "indicateur": "transports",
-        "signe": "positif",
-        "source": "paris_opendata",
-        "api_dataset_id": "comptage-multimodal-comptages",
-        "api_max_records": 100_000,
-        "api_order_by": "t desc",
-        "export_format": "csv",
-        "export_sep": ";",
-        # "api_max_records": 2000,
-        "format_source": "api_opendata",
-    },
-    {
-        "id": "velib",
-        "label": "Vélib — Stations et disponibilité",
-        "indicateur": "transports",
-        "signe": "positif",
-        "source": "transport_gouv",
-        "api_base_url": "https://opendata.paris.fr/api/explore/v2.1/catalog/datasets",
-        "api_dataset_id": "velib-disponibilite-en-temps-reel",
-        # "api_max_records": 2000,
-        "format_source": "api_opendata",
-    },
+    # voies, velib → Kafka streaming (kafka_producer.py)
     {
         "id": "gares",
         "label": "Gares de voyageurs — Île-de-France",
@@ -472,8 +438,7 @@ def _fetch_api_export(dataset: dict, default_base_url: str, label: str) -> pd.Da
     if dataset.get("api_where"):
         scope = f"{scope}, where={dataset['api_where']}"
     log.info(f"  Fetch {label} [{dataset_id}] via export {export_format.upper()} ({scope})")
-    with requests.get(export_url, params=request_params, stream=True, timeout=(30, 300)) as response:
-        response.raise_for_status()
+    with _http_get_with_retry(export_url, params=request_params, stream=True, timeout=(30, 300)) as response:
         content_length = response.headers.get("content-length")
         total_bytes = int(content_length) if content_length and content_length.isdigit() else None
         download_progress = tqdm(
@@ -526,12 +491,11 @@ def fetch_api(dataset: dict) -> pd.DataFrame:
     log.info(f"  Fetch API OpenDataSoft [{dataset_id}] (max {'ALL' if max_records in (None, '', False) else max_records})")
     try:
         while True:
-            r = requests.get(
+            r = _http_get_with_retry(
                 f"{base_url}/{dataset_id}/records",
                 params={"limit": PAGE_SIZE, "offset": offset},
                 timeout=30,
             )
-            r.raise_for_status()
             data = r.json()
             if total is None:
                 total = data.get("total_count", 0)
@@ -580,15 +544,14 @@ def fetch_api_generic(dataset: dict) -> pd.DataFrame:
     try:
         while True:
             try:
-                r = requests.get(
+                r = _http_get_with_retry(
                     f"{base_url}/{dataset_id}/records",
                     params={"limit": PAGE_SIZE, "offset": offset},
                     timeout=30,
                 )
-                r.raise_for_status()
                 data = r.json()
             except Exception as e:
-                log.warning(f"    Erreur API {dataset_id} : {e}")
+                log.warning(f"    Erreur API {dataset_id} après 3 tentatives : {e}")
                 break
 
             if total is None:
@@ -750,6 +713,18 @@ def _key_prefix(ingestion_date: str, dataset: dict) -> str:
     return f"ingestion_date={ingestion_date}/{dataset['indicateur']}/{dataset['id']}"
 
 
+def _already_ingested_today(dataset: dict, ingestion_date: str) -> bool:
+    """Retourne True si raw.parquet existe déjà dans MinIO pour cette date."""
+    key = f"{_key_prefix(ingestion_date, dataset)}/raw.parquet"
+    try:
+        s3.head_object(Bucket=BUCKET, Key=key)
+        return True
+    except ClientError as e:
+        if e.response["Error"]["Code"] in ("404", "NoSuchKey"):
+            return False
+        raise
+
+
 def save_bronze_minio(df: pd.DataFrame, dataset: dict, ingestion_date: str):
     """Écrit raw.parquet (+ raw.json pour petits datasets) dans MinIO."""
     df = _sanitize_for_export(df)
@@ -815,6 +790,7 @@ def init_minio():
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 def run():
+    _t0 = time.perf_counter()
     ingestion_date = str(date.today())
     log.info(f"{'='*60}")
     log.info(f"Bronze Feeder — {ingestion_date}")
@@ -822,14 +798,12 @@ def run():
 
     init_minio()
 
-    results = []
+    def _process_one(ds: dict) -> dict:
+        if _already_ingested_today(ds, ingestion_date):
+            log.info(f"  ⏭  [{ds['id']}] déjà présent pour {ingestion_date} — skip")
+            return {"id": ds["id"], "indicateur": ds.get("indicateur"), "rows": 0, "status": "SKIP"}
 
-    dataset_progress = tqdm(DATASETS, desc="Bronze datasets", unit="dataset")
-    for idx, ds in enumerate(dataset_progress, start=1):
-        dataset_progress.set_description_str(f"Bronze {idx}/{len(DATASETS)}")
-        dataset_progress.set_postfix_str(ds["id"])
         log.info(f"\n[{ds['indicateur'].upper()}][{ds['signe'].upper()}] {ds['label']}")
-
         try:
             if ds.get("local_file"):
                 df = load_local(ds)
@@ -843,26 +817,40 @@ def run():
                 df = fetch_api(ds)
 
             if df.empty:
-                log.warning(f"  DataFrame vide, dataset ignoré.")
-                results.append({"id": ds["id"], "indicateur": ds.get("indicateur"), "rows": 0, "status": "VIDE"})
-                continue
+                log.warning(f"  [{ds['id']}] DataFrame vide, dataset ignoré.")
+                return {"id": ds["id"], "indicateur": ds.get("indicateur"), "rows": 0, "status": "VIDE"}
 
             df = add_meta_columns(df, ds, ingestion_date)
             save_bronze_minio(df, ds, ingestion_date)
             write_meta_minio(df, ds, ingestion_date)
 
-            results.append({
+            return {
                 "id": ds["id"],
                 "indicateur": ds.get("indicateur"),
                 "signe": ds["signe"],
                 "rows": len(df),
                 "status": "OK",
                 "minio_prefix": _key_prefix(ingestion_date, ds),
-            })
-
+            }
         except Exception as e:
-            log.error(f"  ERREUR : {e}")
-            results.append({"id": ds["id"], "indicateur": ds.get("indicateur"), "rows": 0, "status": f"ERREUR: {e}"})
+            log.error(f"  [{ds['id']}] ERREUR : {e}")
+            return {"id": ds["id"], "indicateur": ds.get("indicateur"), "rows": 0, "status": f"ERREUR: {e}"}
+
+    # Parallélisation I/O-bound : HTTP fetch + MinIO upload simultanés
+    # max_workers=5 : équilibre débit réseau / mémoire (datasets lourds coexistent)
+    MAX_WORKERS = int(os.environ.get("BRONZE_WORKERS", "5"))
+    results_lock = threading.Lock()
+    results = []
+
+    dataset_progress = tqdm(total=len(DATASETS), desc="Bronze datasets", unit="dataset")
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        futures = {executor.submit(_process_one, ds): ds for ds in DATASETS}
+        for future in as_completed(futures):
+            result = future.result()
+            with results_lock:
+                results.append(result)
+            dataset_progress.set_postfix_str(result["id"])
+            dataset_progress.update(1)
     dataset_progress.close()
 
     # ── Rapport final ──────────────────────────────────────────────────────
@@ -870,8 +858,11 @@ def run():
     log.info("RAPPORT D'INGESTION BRONZE")
     log.info(f"{'='*60}")
     ok = [r for r in results if r["status"] == "OK"]
-    ko = [r for r in results if r["status"] not in ("OK", "VIDE")]
+    ko = [r for r in results if r["status"] not in ("OK", "VIDE", "SKIP")]
     vide = [r for r in results if r["status"] == "VIDE"]
+    skip = [r for r in results if r["status"] == "SKIP"]
+    if skip:
+        log.info(f"  ⏭  Skippés : {len(skip)} (déjà ingérés aujourd'hui)")
     log.info(f"  ✅ Succès  : {len(ok)}/{len(results)}")
     for r in ok:
         log.info(f"    [{r.get('indicateur','?'):20}] {r['id']:45} {r['rows']:>8} lignes")
@@ -884,8 +875,15 @@ def run():
         for r in ko:
             log.info(f"    {r['id']} — {r['status']}")
 
+    elapsed = time.perf_counter() - _t0
+    total_rows = sum(r.get("rows", 0) for r in results if r.get("rows"))
+    log.info(f"[PERF] bronze_feeder : {elapsed:.1f}s — {len([r for r in results if r['status']=='OK'])} datasets OK — {total_rows:,} lignes totales")
+
     report_key = f"ingestion_date={ingestion_date}/_ingestion_report.json"
-    body = json.dumps({"ingestion_date": ingestion_date, "datasets": results}, indent=2).encode("utf-8")
+    body = json.dumps(
+        {"ingestion_date": ingestion_date, "elapsed_seconds": round(elapsed, 1), "total_rows": total_rows, "datasets": results},
+        indent=2,
+    ).encode("utf-8")
     s3.put_object(Bucket=BUCKET, Key=report_key, Body=body)
     log.info(f"\n  Rapport sauvegardé : s3://{BUCKET}/{report_key}")
     log.info(f"{'='*60}\n")
