@@ -638,6 +638,52 @@ input[type="range"]::-webkit-slider-thumb:hover {
 .kpi-row span { color: var(--text-secondary); flex: 1; }
 .kpi-row b { color: var(--text-primary); font-weight: 600; white-space: nowrap; }
 
+/* Badge année sur les sections Détails */
+.section-title-wrap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.year-badge {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: rgba(234, 179, 8, 0.18);
+  color: #ca8a04;
+  border: 1px solid rgba(234, 179, 8, 0.35);
+  letter-spacing: 0.02em;
+  cursor: help;
+}
+
+/* Barre countdown données streaming */
+.streaming-status {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 10px 20px 6px;
+  padding: 7px 10px;
+  border-radius: 6px;
+  background: rgba(59, 130, 246, 0.08);
+  border: 1px solid rgba(59, 130, 246, 0.2);
+  font-size: 11px;
+  color: var(--text-secondary);
+  cursor: help;
+}
+.streaming-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #22c55e;
+  flex-shrink: 0;
+  animation: pulse-dot 2s infinite;
+}
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+.streaming-status b { color: var(--text-primary); }
+
 /* Timeline */
 .timeline-wrap {
   padding: 14px 20px;

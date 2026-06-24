@@ -1,7 +1,8 @@
 import { Chart } from "chart.js/auto";
-import { fetchKPIs, fetchTimeline } from "./api.js";
+import { fetchKPIs, fetchTimeline, fetchStreamingStatus } from "./api.js";
 
-let timelineChart = null;
+let timelineChart    = null;
+let _streamingTimer  = null;
 
 function fmt(v, unit = "") {
   return v != null ? `${Number(v).toLocaleString("fr-FR")}${unit}` : "—";
@@ -38,12 +39,17 @@ function scoreCard(label, value, scale, fullWidth = false) {
     </div>`;
 }
 
-function detailSection(title, rows) {
+function yearBadge(dataAnnee, sliderAnnee) {
+  if (!dataAnnee || !sliderAnnee || dataAnnee === sliderAnnee) return "";
+  return `<span class="year-badge" title="Dernière donnée disponible : ${dataAnnee}">${dataAnnee}</span>`;
+}
+
+function detailSection(title, rows, dataAnnee, sliderAnnee) {
   const id = title.replace(/\s+/g, "-").toLowerCase();
   return `
     <div class="detail-section">
       <button type="button" class="detail-toggle" data-target="${id}">
-        ${title}
+        <span class="section-title-wrap">${title}${yearBadge(dataAnnee, sliderAnnee)}</span>
         <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <polyline points="6 9 12 15 18 9"></polyline>
         </svg>
@@ -53,6 +59,31 @@ function detailSection(title, rows) {
           <div class="kpi-row"><span>${label}</span><b>${val}</b></div>`).join("")}
       </div>
     </div>`;
+}
+
+function startStreamingCountdown(lastUpdate, intervalSeconds) {
+  if (_streamingTimer) clearInterval(_streamingTimer);
+
+  const tick = () => {
+    const el = document.getElementById("streaming-timer-value");
+    if (!el) { clearInterval(_streamingTimer); _streamingTimer = null; return; }
+
+    if (!lastUpdate) { el.textContent = "en attente"; return; }
+
+    const nextMs = new Date(lastUpdate).getTime() + intervalSeconds * 1000;
+    const remaining = nextMs - Date.now();
+
+    if (remaining <= 0) {
+      el.textContent = "imminent";
+    } else {
+      const m = Math.floor(remaining / 60000);
+      const s = Math.floor((remaining % 60000) / 1000);
+      el.textContent = `${m}m ${String(s).padStart(2, "0")}s`;
+    }
+  };
+
+  tick();
+  _streamingTimer = setInterval(tick, 1000);
 }
 
 export async function openSidebar(areaSelection, annee, getIndicatorScale, level = "quartier") {
@@ -70,9 +101,10 @@ export async function openSidebar(areaSelection, annee, getIndicatorScale, level
   content.innerHTML = `<p class="loading">Chargement…</p>`;
 
   try {
-    const [kpis, timeline] = await Promise.all([
+    const [kpis, timeline, streamingStatus] = await Promise.all([
       fetchKPIs(areaId, annee, level),
       fetchTimeline(areaId, level),
+      fetchStreamingStatus().catch(() => null),
     ]);
 
     const nom = kpis.nom || kpis.iris_nom || timeline.nom || areaMeta.nom || "Zone";
@@ -126,6 +158,11 @@ export async function openSidebar(areaSelection, annee, getIndicatorScale, level
 
       <!-- Tab: Détails -->
       <div class="tab-panel" id="tab-details">
+        ${streamingStatus ? `
+        <div class="streaming-status" title="Vélib · Sanisettes · Chantiers · Anomalies · Voies — rafraîchis toutes les 5 min via Kafka">
+          <span class="streaming-dot"></span>
+          <span>Données temps réel — prochain rafraîchissement dans <b id="streaming-timer-value">…</b></span>
+        </div>` : ""}
         ${detailSection("Immobilier", [
           ["Prix m² médian",         fmt(kpis.prix_m2_median, " €")],
           ["Surface médiane",        fmt(kpis.surface_mediane, " m²")],
@@ -137,7 +174,7 @@ export async function openSidebar(areaSelection, annee, getIndicatorScale, level
           ["Effort achat (50 m²)",   kpis.taux_effort_achat != null
             ? `${Number(kpis.taux_effort_achat).toFixed(1)} ans de revenu`
             : "—"],
-        ])}
+        ], kpis.annee_immo, annee)}
         <div class="detail-section">
           <button type="button" class="detail-toggle" data-target="repartition-logements">
             Répartition par surface
@@ -162,7 +199,7 @@ export async function openSidebar(areaSelection, annee, getIndicatorScale, level
           ["Chantiers actifs",    fmt(kpis.nb_chantiers_actifs)],
           ["Anomalies signalées", fmt(kpis.nb_anomalies)],
           ["Couverture fibre",    fmt(kpis.pct_fibre, " %")],
-        ])}
+        ], kpis.annee_qv, annee)}
         ${detailSection("Transports", [
           ["Gares",                  fmt(kpis.nb_gares)],
           ["Stations Vélib",         fmt(kpis.nb_stations_velib)],
@@ -179,20 +216,20 @@ export async function openSidebar(areaSelection, annee, getIndicatorScale, level
           ["Part vélo/trottinette",  fmt(kpis.pct_flux_velo_trott, " %")],
           ["Part motorisée",         fmt(kpis.pct_flux_motorise, " %")],
           ["Part voies cyclables",   fmt(kpis.pct_flux_voie_cyclable, " %")],
-        ])}
+        ], kpis.annee_transport, annee)}
         ${detailSection("Loisirs", [
           ["Événements", fmt(kpis.nb_evenements)],
           ["Cinémas",    fmt(kpis.nb_cinemas)],
           ["Terrasses",  fmt(kpis.nb_terrasses)],
           ["Musées",     fmt(kpis.nb_musees)],
-        ])}
+        ], kpis.annee_loisirs, annee)}
         ${detailSection("Services publics", [
           ["Écoles élémentaires",  fmt(kpis.nb_ecoles)],
           ["Collèges",             fmt(kpis.nb_colleges)],
           ["Bibliothèques",        fmt(kpis.nb_bibliotheques)],
           ["Bureaux de poste",     fmt(kpis.nb_bureaux_poste)],
           ["Enseignement sup.",    fmt(kpis.nb_ensup)],
-        ])}
+        ], kpis.annee_services, annee)}
       </div>
 
       <!-- Tab: Tendance -->
@@ -210,6 +247,10 @@ export async function openSidebar(areaSelection, annee, getIndicatorScale, level
     bindAccordions(content);
     renderTimeline(timeline);
     renderDonutSurfaces(kpis);
+
+    if (streamingStatus?.last_update) {
+      startStreamingCountdown(streamingStatus.last_update, streamingStatus.refresh_interval_seconds ?? 300);
+    }
 
   } catch (e) {
     content.innerHTML = `<p class="error">Erreur : ${e.message}</p>`;

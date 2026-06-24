@@ -88,6 +88,12 @@ export async function fetchCompare(arr1, arr2, annee) {
   return r.json();
 }
 
+export async function fetchStreamingStatus() {
+  const r = await apiFetch("/streaming/status");
+  if (!r.ok) return null;
+  return r.json();
+}
+
 export async function fetchPointsGeoJSON(type) {
   const r = await apiFetch(`/geo/points?type=${encodeURIComponent(type)}`);
   if (!r.ok) throw new Error(`Points fetch failed: ${r.status}`);
