@@ -141,6 +141,17 @@ def _write_mongo_collection(db, df: pd.DataFrame, collection_name: str, id_col: 
     if not records:
         return
 
+    # Parquet stocke les dicts comme strings — les repasser en dict pour MongoDB
+    if "location" in df.columns:
+        import json as _json
+        for r in records:
+            loc = r.get("location")
+            if isinstance(loc, str):
+                try:
+                    r["location"] = _json.loads(loc)
+                except Exception:
+                    r["location"] = None
+
     if id_col and id_col in df.columns and len(records) < 10_000:
         ops = [UpdateOne({id_col: r[id_col]}, {"$set": r}, upsert=True) for r in records]
         result = coll.bulk_write(ops, ordered=False)
@@ -210,6 +221,18 @@ def count_by_arr(coll, arr_field: str = "arrondissement") -> dict:
     pipeline = [
         {"$match": {arr_field: {"$in": ARRONDISSEMENTS}}},
         {"$group": {"_id": f"${arr_field}", "count": {"$sum": 1}}},
+    ]
+    return {doc["_id"]: doc["count"] for doc in coll.aggregate(pipeline)}
+
+
+def count_by_arr_from_insee(coll, arr_field: str = "arrondissement") -> dict:
+    """Compte les documents dont arr_field est un code INSEE '750XX' → int 1-20.
+    Utilisé pour les collections Kafka (sanisettes, chantiers) qui stockent '75004' etc."""
+    pipeline = [
+        {"$match": {arr_field: {"$regex": "^750[0-2][0-9]$"}}},
+        {"$addFields": {"_arr_int": {"$toInt": {"$substr": [f"${arr_field}", 3, 2]}}}},
+        {"$match": {"_arr_int": {"$in": ARRONDISSEMENTS}}},
+        {"$group": {"_id": "$_arr_int", "count": {"$sum": 1}}},
     ]
     return {doc["_id"]: doc["count"] for doc in coll.aggregate(pipeline)}
 
@@ -947,9 +970,9 @@ def agg_qualite_vie(db) -> dict:
     fraicheur_scores = _espace_vert_fraicheur_scores(db["silver_espaces_verts"])
     score_fraicheur = _sum_score_by_arr(db["silver_espaces_verts"], fraicheur_scores)
     arbres        = count_by_arr(db["silver_arbres"])
-    sanisettes    = count_by_arr(db["silver_sanisettes"])
-    chantiers     = count_by_arr(db["silver_chantiers"])
-    anomalies     = count_by_arr(db["silver_anomalies"])
+    sanisettes    = count_by_arr_from_insee(db["sanisettes"])
+    chantiers     = count_by_arr_from_insee(db["chantiers"], arr_field="cp_arrondissement")
+    anomalies     = count_by_arr(db["anomalies"])
 
     # Air : données Paris-wide → valeur propagée à tous les arrondissements
     air_doc        = db["silver_qualite_air"].find_one(sort=[("annee", -1)])
@@ -1459,9 +1482,9 @@ def agg_quartiers(db, annee: int, arrondissement_kpis: dict) -> dict:
     for field, coll_name in [
         ("nb_espaces_verts", "silver_espaces_verts"),
         ("nb_arbres", "silver_arbres"),
-        ("nb_sanisettes", "silver_sanisettes"),
-        ("nb_chantiers_actifs", "silver_chantiers"),
-        ("nb_anomalies", "silver_anomalies"),
+        ("nb_sanisettes", "sanisettes"),
+        ("nb_chantiers_actifs", "chantiers"),
+        ("nb_anomalies", "anomalies"),
     ]:
         counts = _count_by_quartier(db[coll_name], quartier_ids)
         for qid in quartier_ids:
@@ -1845,9 +1868,9 @@ def agg_iris(db, annee: int, arrondissement_kpis: dict) -> dict:
     for field, coll_name in [
         ("nb_espaces_verts", "silver_espaces_verts"),
         ("nb_arbres", "silver_arbres"),
-        ("nb_sanisettes", "silver_sanisettes"),
-        ("nb_chantiers_actifs", "silver_chantiers"),
-        ("nb_anomalies", "silver_anomalies"),
+        ("nb_sanisettes", "sanisettes"),
+        ("nb_chantiers_actifs", "chantiers"),
+        ("nb_anomalies", "anomalies"),
     ]:
         counts = _count_by_iris(db[coll_name], iris_ids)
         for iris_id in iris_ids:
