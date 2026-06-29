@@ -29,6 +29,7 @@ class KPIs(BaseModel):
 
     score_qualite_vie: Optional[float] = None
     nb_espaces_verts: Optional[int] = None
+    score_fraicheur_espaces_verts: Optional[float] = None
     nb_arbres: Optional[int] = None
     score_air_no2: Optional[float] = None
     score_air_pm25: Optional[float] = None

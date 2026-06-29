@@ -782,6 +782,10 @@ def transform_espaces_verts(df: pd.DataFrame) -> pd.DataFrame:
         "identifiant", "nom", "type", "arrondissement",
         *ADMIN_SUBAREA_FIELDS,
         "statut_ouverture", "ouvert_24h", "adresse", "location",
+        # Score de fraîcheur détaillé (végétation haute + amplitude horaire)
+        "p_vegetation_h", "proportion_vegetation_haute",
+        "horaires_periode", "horaires_lundi", "horaires_mardi", "horaires_mercredi",
+        "horaires_jeudi", "horaires_vendredi", "horaires_samedi", "horaires_dimanche",
         "_ingested_at", "_dataset_id", "_indicateur", "_signe", "_source",
     ]
     return df[[c for c in keep if c in df.columns]]
