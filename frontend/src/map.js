@@ -32,7 +32,7 @@ let currentScale = {
   ],
 };
 const currentScalesByIndicator = {};
-const REVERSED_SCALE_INDICATORS = new Set(["prix_m2_median"]);
+const REVERSED_SCALE_INDICATORS = new Set(["prix_m2_median", "nb_logements_sociaux"]);
 const activePointLayers = new Set();
 const pointLayerEventsBound = new Set();
 
