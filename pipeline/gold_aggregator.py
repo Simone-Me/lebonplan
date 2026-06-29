@@ -1071,7 +1071,7 @@ def agg_transports(db) -> dict:
     }
 
     # Velib
-    for doc in db["silver_velib"].find({"arrondissement": {"$in": ARRONDISSEMENTS}}):
+    for doc in db["velib"].find({"arrondissement": {"$in": ARRONDISSEMENTS}}):
         arr = doc.get("arrondissement")
         if arr not in result:
             continue
@@ -1130,7 +1130,7 @@ def agg_transports(db) -> dict:
         ) if arrets_total[arr] else 0.0
 
     # Comptages : intensité d'usage observée
-    flux_collection = db["silver_voies"]
+    flux_collection = db["voies"]
     if flux_collection.count_documents({}) == 0:
         flux_collection = db["silver_comptage_multimodal"]
 
@@ -1548,7 +1548,7 @@ def agg_quartiers(db, annee: int, arrondissement_kpis: dict) -> dict:
     flux_cycle_way = {qid: 0.0 for qid in quartier_ids}
 
     for qid, doc in _iter_quartier_docs(
-        db["silver_velib"],
+        db["velib"],
         {},
         {"quartier_id": 1, "location": 1, "capacity": 1},
         quartier_ids,
@@ -1608,7 +1608,7 @@ def agg_quartiers(db, annee: int, arrondissement_kpis: dict) -> dict:
             arrets_accessibles[qid] / arrets_total[qid] * 100, 2
         ) if arrets_total[qid] else 0.0
 
-    flux_collection = db["silver_voies"]
+    flux_collection = db["voies"]
     if flux_collection.count_documents({}) == 0:
         flux_collection = db["silver_comptage_multimodal"]
 
@@ -1930,7 +1930,7 @@ def agg_iris(db, annee: int, arrondissement_kpis: dict) -> dict:
     flux_cycle_way = {iris_id: 0.0 for iris_id in iris_ids}
 
     for iris_id, doc in _iter_iris_docs(
-        db["silver_velib"],
+        db["velib"],
         {},
         {"iris_id": 1, "location": 1, "capacity": 1},
         iris_ids,
@@ -1990,7 +1990,7 @@ def agg_iris(db, annee: int, arrondissement_kpis: dict) -> dict:
             arrets_accessibles[iris_id] / arrets_total[iris_id] * 100, 2
         ) if arrets_total[iris_id] else 0.0
 
-    flux_collection = db["silver_voies"]
+    flux_collection = db["voies"]
     if flux_collection.count_documents({}) == 0:
         flux_collection = db["silver_comptage_multimodal"]
 
