@@ -122,7 +122,6 @@ function startStreamingCountdown(lastUpdate, intervalSeconds) {
     const remaining = nextMs - Date.now();
 
     if (remaining <= 0) {
-      el.textContent = "imminent";
       // Poll toutes les 10s pour détecter un nouveau batch
       if (Date.now() - _lastPoll > 10_000) {
         _lastPoll = Date.now();
@@ -133,6 +132,8 @@ function startStreamingCountdown(lastUpdate, intervalSeconds) {
           }
         } catch (_) {}
       }
+      const ago = Math.floor(-remaining / 60000);
+      el.textContent = ago < 1 ? "imminent" : `il y a ${ago}m`;
     } else {
       const m = Math.floor(remaining / 60000);
       const s = Math.floor((remaining % 60000) / 1000);
