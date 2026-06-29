@@ -16,7 +16,7 @@ _SECTIONS = [
         "nb_appartements", "nb_maisons", "pct_appartements",
     ]),
     ("annee_qv", "nb_arbres", [
-        "nb_espaces_verts", "nb_arbres", "pct_fibre", "nb_sanisettes",
+        "nb_espaces_verts", "score_fraicheur_espaces_verts", "nb_arbres", "pct_fibre", "nb_sanisettes",
         "nb_chantiers_actifs", "nb_anomalies", "score_qualite_vie", "score_air_no2", "score_air_pm25",
     ]),
     ("annee_transport", "nb_gares", [

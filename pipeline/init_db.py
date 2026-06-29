@@ -79,6 +79,7 @@ CREATE TABLE IF NOT EXISTS gold.quartier_kpis (
     -- Indicateur 1 : Qualité de vie
     score_qualite_vie       FLOAT,
     nb_espaces_verts        INT,
+    score_fraicheur_espaces_verts FLOAT,
     nb_arbres               INT,
     score_air_no2           FLOAT,
     score_air_pm25          FLOAT,
@@ -158,6 +159,7 @@ CREATE TABLE IF NOT EXISTS gold.iris_kpis (
     -- Indicateur 1 : Qualité de vie
     score_qualite_vie        FLOAT,
     nb_espaces_verts         INT,
+    score_fraicheur_espaces_verts FLOAT,
     nb_arbres                INT,
     score_air_no2            FLOAT,
     score_air_pm25           FLOAT,
@@ -232,6 +234,7 @@ CREATE TABLE IF NOT EXISTS gold.arrondissement_kpis (
     -- Indicateur 1 : Qualité de vie
     score_qualite_vie       FLOAT,
     nb_espaces_verts        INT,
+    score_fraicheur_espaces_verts FLOAT,
     nb_arbres               INT,
     score_air_no2           FLOAT,
     score_air_pm25          FLOAT,
@@ -333,6 +336,9 @@ ALTER TABLE gold.quartier_kpis ADD COLUMN IF NOT EXISTS nb_t1 INT;
 ALTER TABLE gold.quartier_kpis ADD COLUMN IF NOT EXISTS nb_t2 INT;
 ALTER TABLE gold.quartier_kpis ADD COLUMN IF NOT EXISTS nb_t3 INT;
 ALTER TABLE gold.quartier_kpis ADD COLUMN IF NOT EXISTS nb_t4plus INT;
+ALTER TABLE gold.arrondissement_kpis ADD COLUMN IF NOT EXISTS score_fraicheur_espaces_verts FLOAT;
+ALTER TABLE gold.quartier_kpis ADD COLUMN IF NOT EXISTS score_fraicheur_espaces_verts FLOAT;
+ALTER TABLE gold.iris_kpis ADD COLUMN IF NOT EXISTS score_fraicheur_espaces_verts FLOAT;
 """
 
 

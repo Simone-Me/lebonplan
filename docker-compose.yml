@@ -105,6 +105,7 @@ services:
 
   kafka:
     image: apache/kafka:3.7.0
+    hostname: kafka
     ports:
       - "9092:9092"
     environment:
