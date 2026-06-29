@@ -110,7 +110,7 @@ function startStreamingCountdown(lastUpdate, intervalSeconds) {
   if (_streamingTimer) clearInterval(_streamingTimer);
 
   let _lastUpdate = lastUpdate;
-  let _polling = false;
+  let _lastPoll = 0;
 
   const tick = async () => {
     const el = document.getElementById("streaming-timer-value");
@@ -123,15 +123,15 @@ function startStreamingCountdown(lastUpdate, intervalSeconds) {
 
     if (remaining <= 0) {
       el.textContent = "imminent";
-      if (!_polling) {
-        _polling = true;
+      // Poll toutes les 10s pour détecter un nouveau batch
+      if (Date.now() - _lastPoll > 10_000) {
+        _lastPoll = Date.now();
         try {
           const status = await fetchStreamingStatus();
           if (status?.last_update && status.last_update !== _lastUpdate) {
             _lastUpdate = status.last_update;
           }
         } catch (_) {}
-        _polling = false;
       }
     } else {
       const m = Math.floor(remaining / 60000);
