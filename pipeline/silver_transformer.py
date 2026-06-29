@@ -699,6 +699,7 @@ def _base_geo(df: pd.DataFrame) -> pd.DataFrame:
         ("ylatitude", "xlongitude"),
         ("arrgeopoint.lat", "arrgeopoint.lon"),
         ("coordonnees_geo.lat", "coordonnees_geo.lon"),
+        ("coordonnees.lat", "coordonnees.lon"),
         ("geo.lat", "geo.lon"),
         ("geolocalisation.lat", "geolocalisation.lon"),
         ("position.lat", "position.lon"),
@@ -823,8 +824,16 @@ def transform_fibre_imb(df: pd.DataFrame) -> pd.DataFrame:
                 if pd.notna(lo) and pd.notna(la) else None
                 for lo, la in zip(lons, lats)
             ]
-    if "imb_code_insee" in df.columns:
+    # addr_code format: "75112_xxxx_xxxxx" → arrondissement 12
+    # imb_code_insee is always 75056 (Paris commune), not usable
+    if "addr_code" in df.columns:
+        df["arrondissement"] = df["addr_code"].apply(
+            lambda v: parse_arrondissement(str(v)[:5]) if pd.notna(v) else None
+        )
+    elif "imb_code_insee" in df.columns:
         df["arrondissement"] = df["imb_code_insee"].apply(parse_arrondissement)
+    # Presence in this dataset = building is fibre-eligible/deployed
+    df["statut_immeuble"] = "Déployé"
     return _enrich_admin_areas(df)
 
 
