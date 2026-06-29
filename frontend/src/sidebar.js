@@ -109,17 +109,30 @@ function renderSkeleton() {
 function startStreamingCountdown(lastUpdate, intervalSeconds) {
   if (_streamingTimer) clearInterval(_streamingTimer);
 
-  const tick = () => {
+  let _lastUpdate = lastUpdate;
+  let _polling = false;
+
+  const tick = async () => {
     const el = document.getElementById("streaming-timer-value");
     if (!el) { clearInterval(_streamingTimer); _streamingTimer = null; return; }
 
-    if (!lastUpdate) { el.textContent = "en attente"; return; }
+    if (!_lastUpdate) { el.textContent = "en attente"; return; }
 
-    const nextMs = new Date(lastUpdate).getTime() + intervalSeconds * 1000;
+    const nextMs = new Date(_lastUpdate).getTime() + intervalSeconds * 1000;
     const remaining = nextMs - Date.now();
 
     if (remaining <= 0) {
       el.textContent = "imminent";
+      if (!_polling) {
+        _polling = true;
+        try {
+          const status = await fetchStreamingStatus();
+          if (status?.last_update && status.last_update !== _lastUpdate) {
+            _lastUpdate = status.last_update;
+          }
+        } catch (_) {}
+        _polling = false;
+      }
     } else {
       const m = Math.floor(remaining / 60000);
       const s = Math.floor((remaining % 60000) / 1000);
