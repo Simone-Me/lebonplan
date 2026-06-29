@@ -377,7 +377,7 @@ Pour le détail complet (qualité, colonnes clés, limites) : `docs/data_catalog
 
 ### 4 scores composites (0–100)
 
-**Qualité de vie** : espaces verts, arbres, fibre, sanisettes, qualité air — pénalité chantiers/anomalies
+**Qualité de vie** : score de fraîcheur détaillé par espace vert/îlot de fraîcheur (végétation haute <25%→0.5pt · 25-50%→1pt · >50%→2pts, + ouverture 24h/24 + bonus amplitude horaire hebdomadaire vs les autres espaces verts), arbres, fibre, sanisettes, qualité air — pénalité chantiers/anomalies
 
 **Transports** : `0.6 × offre + 0.4 × intensité`
 - Offre : gares, Vélib, lignes, modes lourds, arrêts bus, accessibilité
@@ -506,7 +506,8 @@ Pour la logique détaillée : `docs/carte-detaillee-paris.md`
 | `v0.4.0` | Revenus INSEE Filosofi, types logement, points carte, scheduler, docs |
 | `v0.5.0` | Kafka streaming (vélib/sanisettes/chantiers/anomalies), PBKDF2 sécurité, tests API, data catalog, perf report |
 | `v0.6.0` | Architecture médaillon stricte : Silver = MinIO Parquet only → MongoDB déplacé en Gold (Phase 1 silver→mongo, Phase 2 mongo→postgres). Kafka étendu à 5 datasets + Voies 100k. Ingestion idempotente Bronze + Silver. PIP vectorisé geopandas.sjoin (20–50× plus rapide). |
-| **`v0.7.0`** | **Badges année par section (fallback API si NULL) + countdown temps réel Kafka dans le dashboard. Endpoint `/api/streaming/status`.** |
+| `v0.7.0` | Badges année par section (fallback API si NULL) + countdown temps réel Kafka dans le dashboard. Endpoint `/api/streaming/status`. |
+| **`v0.8.0`** | **Score de fraîcheur détaillé par espace vert (`score_fraicheur_espaces_verts`) : palier végétation haute, ouverture 24h/24, bonus amplitude horaire — remplace le simple comptage dans `score_qualite_vie` aux 3 granularités (arrondissement/quartier/IRIS). Silver conserve `proportion_vegetation_haute`, `p_vegetation_h`, `horaires_*`.** |
 
 ---
 

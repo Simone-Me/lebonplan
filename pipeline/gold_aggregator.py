@@ -283,6 +283,7 @@ def _default_arrondissement_kpis() -> dict:
         "nb_t4plus": None,
         "score_qualite_vie": 0.0,
         "nb_espaces_verts": 0,
+        "score_fraicheur_espaces_verts": 0.0,
         "nb_arbres": 0,
         "score_air_no2": 0.0,
         "score_air_pm25": 0.0,
@@ -800,22 +801,151 @@ def _iter_iris_docs(coll, query: dict, projection: dict, iris_ids: list[str]):
             yield iris["iris_id"], doc
 
 
+# ─── Score de fraîcheur détaillé — Îlots de fraîcheur / espaces verts ─────────
+#
+# Pour chaque espace vert, remplace le simple COUNT par un score individuel :
+#   - Végétation haute (proportion_vegetation_haute / p_vegetation_h) :
+#       < 25 %        → très exposé au soleil, plutôt chaud   → 0.5 pt
+#       25 % à 50 %   → partiellement ombragé, modérément frais → 1 pt
+#       > 50 %        → très ombragé, frais                  → 2 pts
+#   - Ouverture 24h/24 (ouvert_24h) : Oui → 1 pt, Non → 0.5 pt
+#   - Amplitude horaire hebdomadaire (horaires_lundi..horaires_dimanche) :
+#       bonus 0-1 pt, proportionnel à l'amplitude par rapport aux autres
+#       espaces verts du jeu de données (min-max), quand l'info est disponible.
+# Le score total par espace vert est ensuite sommé par zone (arrondissement /
+# quartier / IRIS) pour nourrir le sous-score "espaces verts" de qualite_vie,
+# à la place du simple dénombrement.
+
+_HORAIRES_JOURS = [
+    "horaires_lundi", "horaires_mardi", "horaires_mercredi", "horaires_jeudi",
+    "horaires_vendredi", "horaires_samedi", "horaires_dimanche",
+]
+_HORAIRE_RE = re.compile(r"(\d{1,2})h(\d{2})\s*-\s*(\d{1,2})h(\d{2})")
+
+
+def _vegetation_fraicheur_points(doc: dict) -> float:
+    """Points de fraîcheur selon la part de végétation haute (canopée)."""
+    pct = doc.get("proportion_vegetation_haute")
+    if pct is None:
+        p_ratio = doc.get("p_vegetation_h")
+        pct = p_ratio * 100 if p_ratio is not None else None
+    pct = _as_float(pct, None) if pct is not None else None
+    if pct is None or math.isnan(pct):
+        return 0.0
+    if pct < 25:
+        return 0.5
+    if pct <= 50:
+        return 1.0
+    return 2.0
+
+
+def _ouverture_24h_points(doc: dict) -> float:
+    """Points selon que l'espace vert est ouvert 24h/24 ou non."""
+    value = str(doc.get("ouvert_24h") or "").strip().lower()
+    if value == "oui":
+        return 1.0
+    if value == "non":
+        return 0.5
+    return 0.0
+
+
+def _parse_horaire_duration(value) -> float:
+    """Durée d'ouverture (heures) pour une plage 'HHhMM - HHhMM' (0 si fermé/illisible)."""
+    text_value = str(value or "").strip()
+    if not text_value or text_value == "-":
+        return 0.0
+    m = _HORAIRE_RE.search(text_value)
+    if not m:
+        return 0.0
+    h1, m1, h2, m2 = (int(g) for g in m.groups())
+    start, end = h1 * 60 + m1, h2 * 60 + m2
+    if start == 0 and end >= 23 * 60 + 59:
+        return 24.0
+    return max(end - start, 0) / 60.0
+
+
+def _weekly_open_hours(doc: dict) -> float | None:
+    """Amplitude hebdomadaire d'ouverture en heures, ou None si aucune donnée horaires_* n'est disponible."""
+    values = [doc.get(j) for j in _HORAIRES_JOURS]
+    if all(v in (None, "") for v in values):
+        return None
+    return sum(_parse_horaire_duration(v) for v in values)
+
+
+def _espace_vert_fraicheur_scores(coll) -> dict:
+    """Calcule {identifiant: score_fraicheur} pour chaque espace vert de la collection."""
+    projection = {
+        "identifiant": 1, "proportion_vegetation_haute": 1, "p_vegetation_h": 1, "ouvert_24h": 1,
+        **{jour: 1 for jour in _HORAIRES_JOURS},
+    }
+    docs = list(coll.find({}, projection))
+
+    weekly_hours = {
+        d["identifiant"]: _weekly_open_hours(d)
+        for d in docs if d.get("identifiant") is not None
+    }
+    known_hours = {k: v for k, v in weekly_hours.items() if v is not None}
+    s_horaires = minmax_normalize(known_hours) if known_hours else {}
+
+    scores = {}
+    for d in docs:
+        ident = d.get("identifiant")
+        if ident is None:
+            continue
+        bonus = s_horaires[ident] / 100.0 if ident in s_horaires else 0.0
+        scores[ident] = round(_vegetation_fraicheur_points(d) + _ouverture_24h_points(d) + bonus, 3)
+    return scores
+
+
+def _sum_score_by_arr(coll, scores: dict, arr_field: str = "arrondissement") -> dict:
+    """Somme un score par identifiant {identifiant: score}, agrégé par arrondissement."""
+    totals = {a: 0.0 for a in ARRONDISSEMENTS}
+    for doc in coll.find({arr_field: {"$in": ARRONDISSEMENTS}}, {"identifiant": 1, arr_field: 1}):
+        arr = doc.get(arr_field)
+        score = scores.get(doc.get("identifiant"))
+        if arr in totals and score is not None:
+            totals[arr] += score
+    return {a: round(v, 3) for a, v in totals.items()}
+
+
+def _sum_score_by_quartier(coll, scores: dict, quartier_ids: list[str]) -> dict:
+    """Somme un score par identifiant {identifiant: score}, agrégé par quartier."""
+    totals = {qid: 0.0 for qid in quartier_ids}
+    for qid, doc in _iter_quartier_docs(coll, {}, {"identifiant": 1, "quartier_id": 1, "location": 1}, quartier_ids):
+        score = scores.get(doc.get("identifiant"))
+        if score is not None:
+            totals[qid] += score
+    return {qid: round(v, 3) for qid, v in totals.items()}
+
+
+def _sum_score_by_iris(coll, scores: dict, iris_ids: list[str]) -> dict:
+    """Somme un score par identifiant {identifiant: score}, agrégé par IRIS."""
+    totals = {iid: 0.0 for iid in iris_ids}
+    for iid, doc in _iter_iris_docs(coll, {}, {"identifiant": 1, "iris_id": 1, "location": 1}, iris_ids):
+        score = scores.get(doc.get("identifiant"))
+        if score is not None:
+            totals[iid] += score
+    return {iid: round(v, 3) for iid, v in totals.items()}
+
+
 # ─── Agrégations par indicateur ───────────────────────────────────────────────
 
 # Scoring Indicateur 1 — Qualité de vie
 #
-# Source                  | Collection            | Champ      | Poids | Signe
-# ----------------------- | --------------------- | ---------- | ----- | ------
-# Espaces verts / îlots   | silver_espaces_verts  | COUNT      |   2   | +
-# Arbres                  | silver_arbres         | COUNT      |   1   | +
-# Sanisettes              | silver_sanisettes     | COUNT      |   1   | +
-# Fibre (% déployé)       | silver_fibre_imb      | % déployé  |   1   | +
-# Chantiers               | silver_chantiers      | COUNT      |   1   | - (inversé)
-# Anomalies signalées     | silver_anomalies      | COUNT      |   1   | - (inversé)
-# Qualité air NO2         | silver_qualite_air    | no2 (avg)  |   1   | - (inversé)
+# Source                  | Collection            | Champ                          | Poids | Signe
+# ----------------------- | --------------------- | ------------------------------ | ----- | ------
+# Espaces verts / îlots   | silver_espaces_verts  | score fraîcheur détaillé (SUM) |   2   | +
+# Arbres                  | silver_arbres         | COUNT                          |   1   | +
+# Sanisettes              | silver_sanisettes     | COUNT                          |   1   | +
+# Fibre (% déployé)       | silver_fibre_imb      | % déployé                      |   1   | +
+# Chantiers               | silver_chantiers      | COUNT                          |   1   | - (inversé)
+# Anomalies signalées     | silver_anomalies      | COUNT                          |   1   | - (inversé)
+# Qualité air NO2         | silver_qualite_air    | no2 (avg)                      |   1   | - (inversé)
 
 def agg_qualite_vie(db) -> dict:
     espaces_verts = count_by_arr(db["silver_espaces_verts"])
+    fraicheur_scores = _espace_vert_fraicheur_scores(db["silver_espaces_verts"])
+    score_fraicheur = _sum_score_by_arr(db["silver_espaces_verts"], fraicheur_scores)
     arbres        = count_by_arr(db["silver_arbres"])
     sanisettes    = count_by_arr(db["silver_sanisettes"])
     chantiers     = count_by_arr(db["silver_chantiers"])
@@ -840,7 +970,8 @@ def agg_qualite_vie(db) -> dict:
     result = {}
     for arr in ARRONDISSEMENTS:
         result[arr] = {
-            "nb_espaces_verts":    safe_get(espaces_verts, arr),
+            "nb_espaces_verts":              safe_get(espaces_verts, arr),
+            "score_fraicheur_espaces_verts": score_fraicheur.get(arr, 0.0),
             "nb_arbres":           safe_get(arbres, arr),
             "nb_sanisettes":       safe_get(sanisettes, arr),
             "nb_chantiers_actifs": safe_get(chantiers, arr),
@@ -850,7 +981,7 @@ def agg_qualite_vie(db) -> dict:
             "pct_fibre":           pct_fibre.get(arr, 0),
         }
 
-    s_ev  = minmax_normalize({a: result[a]["nb_espaces_verts"]    for a in ARRONDISSEMENTS})
+    s_ev  = minmax_normalize({a: result[a]["score_fraicheur_espaces_verts"] for a in ARRONDISSEMENTS})
     s_arb = minmax_normalize({a: result[a]["nb_arbres"]           for a in ARRONDISSEMENTS})
     s_san = minmax_normalize({a: result[a]["nb_sanisettes"]       for a in ARRONDISSEMENTS})
     s_fib = minmax_normalize({a: result[a]["pct_fibre"]           for a in ARRONDISSEMENTS})
@@ -1227,6 +1358,7 @@ def agg_quartiers(db, annee: int, arrondissement_kpis: dict) -> dict:
             "nb_logements_sociaux": 0,
             "score_qualite_vie": 0.0,
             "nb_espaces_verts": 0,
+            "score_fraicheur_espaces_verts": 0.0,
             "nb_arbres": 0,
             "score_air_no2": None,
             "score_air_pm25": None,
@@ -1335,6 +1467,11 @@ def agg_quartiers(db, annee: int, arrondissement_kpis: dict) -> dict:
         for qid in quartier_ids:
             result[qid][field] = counts[qid]
 
+    fraicheur_scores = _espace_vert_fraicheur_scores(db["silver_espaces_verts"])
+    score_fraicheur_par_quartier = _sum_score_by_quartier(db["silver_espaces_verts"], fraicheur_scores, quartier_ids)
+    for qid in quartier_ids:
+        result[qid]["score_fraicheur_espaces_verts"] = score_fraicheur_par_quartier.get(qid, 0.0)
+
     fibre_total = {qid: 0 for qid in quartier_ids}
     fibre_deployes = {qid: 0 for qid in quartier_ids}
     for qid, doc in _iter_quartier_docs(
@@ -1355,7 +1492,7 @@ def agg_quartiers(db, annee: int, arrondissement_kpis: dict) -> dict:
         for qid in quartier_ids
     }
 
-    s_ev = minmax_normalize({qid: result[qid]["nb_espaces_verts"] for qid in quartier_ids})
+    s_ev = minmax_normalize({qid: result[qid]["score_fraicheur_espaces_verts"] for qid in quartier_ids})
     s_arb = minmax_normalize({qid: result[qid]["nb_arbres"] for qid in quartier_ids})
     s_san = minmax_normalize({qid: result[qid]["nb_sanisettes"] for qid in quartier_ids})
     s_fib = minmax_normalize({qid: result[qid]["pct_fibre"] for qid in quartier_ids})
@@ -1610,6 +1747,7 @@ def agg_iris(db, annee: int, arrondissement_kpis: dict) -> dict:
             "nb_logements_sociaux": 0,
             "score_qualite_vie": 0.0,
             "nb_espaces_verts": 0,
+            "score_fraicheur_espaces_verts": 0.0,
             "nb_arbres": 0,
             "score_air_no2": None,
             "score_air_pm25": None,
@@ -1715,6 +1853,11 @@ def agg_iris(db, annee: int, arrondissement_kpis: dict) -> dict:
         for iris_id in iris_ids:
             result[iris_id][field] = counts[iris_id]
 
+    fraicheur_scores = _espace_vert_fraicheur_scores(db["silver_espaces_verts"])
+    score_fraicheur_par_iris = _sum_score_by_iris(db["silver_espaces_verts"], fraicheur_scores, iris_ids)
+    for iris_id in iris_ids:
+        result[iris_id]["score_fraicheur_espaces_verts"] = score_fraicheur_par_iris.get(iris_id, 0.0)
+
     fibre_total = {iris_id: 0 for iris_id in iris_ids}
     fibre_deployes = {iris_id: 0 for iris_id in iris_ids}
     for iris_id, doc in _iter_iris_docs(
@@ -1732,7 +1875,7 @@ def agg_iris(db, annee: int, arrondissement_kpis: dict) -> dict:
 
     air_no2 = {iris_id: min(_as_float(result[iris_id]["score_air_no2"], 0.0), 100.0) for iris_id in iris_ids}
 
-    s_ev = minmax_normalize({iris_id: result[iris_id]["nb_espaces_verts"] for iris_id in iris_ids})
+    s_ev = minmax_normalize({iris_id: result[iris_id]["score_fraicheur_espaces_verts"] for iris_id in iris_ids})
     s_arb = minmax_normalize({iris_id: result[iris_id]["nb_arbres"] for iris_id in iris_ids})
     s_san = minmax_normalize({iris_id: result[iris_id]["nb_sanisettes"] for iris_id in iris_ids})
     s_fib = minmax_normalize({iris_id: result[iris_id]["pct_fibre"] for iris_id in iris_ids})
@@ -2188,7 +2331,7 @@ def upsert_kpis(engine, kpis_by_arr: dict, annee: int):
             revenu_median_uc, taux_effort_achat,
             surface_mediane, nb_appartements, nb_maisons, pct_appartements,
             nb_t1, nb_t2, nb_t3, nb_t4plus,
-            score_qualite_vie, nb_espaces_verts, nb_arbres,
+            score_qualite_vie, nb_espaces_verts, score_fraicheur_espaces_verts, nb_arbres,
             score_air_no2, score_air_pm25, pct_fibre,
             nb_sanisettes, nb_chantiers_actifs, nb_anomalies,
             score_transports, score_transport_offre, score_transport_intensite,
@@ -2206,7 +2349,7 @@ def upsert_kpis(engine, kpis_by_arr: dict, annee: int):
             :revenu_median_uc, :taux_effort_achat,
             :surface_mediane, :nb_appartements, :nb_maisons, :pct_appartements,
             :nb_t1, :nb_t2, :nb_t3, :nb_t4plus,
-            :score_qualite_vie, :nb_espaces_verts, :nb_arbres,
+            :score_qualite_vie, :nb_espaces_verts, :score_fraicheur_espaces_verts, :nb_arbres,
             :score_air_no2, :score_air_pm25, :pct_fibre,
             :nb_sanisettes, :nb_chantiers_actifs, :nb_anomalies,
             :score_transports, :score_transport_offre, :score_transport_intensite,
@@ -2235,6 +2378,7 @@ def upsert_kpis(engine, kpis_by_arr: dict, annee: int):
             nb_t4plus             = EXCLUDED.nb_t4plus,
             score_qualite_vie     = EXCLUDED.score_qualite_vie,
             nb_espaces_verts      = EXCLUDED.nb_espaces_verts,
+            score_fraicheur_espaces_verts = EXCLUDED.score_fraicheur_espaces_verts,
             nb_arbres             = EXCLUDED.nb_arbres,
             score_air_no2         = EXCLUDED.score_air_no2,
             score_air_pm25        = EXCLUDED.score_air_pm25,
@@ -2290,7 +2434,7 @@ def upsert_quartier_kpis(engine, kpis_by_quartier: dict, annee: int):
             revenu_median_uc, taux_effort_achat,
             surface_mediane, nb_appartements, nb_maisons, pct_appartements,
             nb_t1, nb_t2, nb_t3, nb_t4plus,
-            score_qualite_vie, nb_espaces_verts, nb_arbres,
+            score_qualite_vie, nb_espaces_verts, score_fraicheur_espaces_verts, nb_arbres,
             score_air_no2, score_air_pm25, pct_fibre,
             nb_sanisettes, nb_chantiers_actifs, nb_anomalies,
             score_transports, score_transport_offre, score_transport_intensite,
@@ -2308,7 +2452,7 @@ def upsert_quartier_kpis(engine, kpis_by_quartier: dict, annee: int):
             :revenu_median_uc, :taux_effort_achat,
             :surface_mediane, :nb_appartements, :nb_maisons, :pct_appartements,
             :nb_t1, :nb_t2, :nb_t3, :nb_t4plus,
-            :score_qualite_vie, :nb_espaces_verts, :nb_arbres,
+            :score_qualite_vie, :nb_espaces_verts, :score_fraicheur_espaces_verts, :nb_arbres,
             :score_air_no2, :score_air_pm25, :pct_fibre,
             :nb_sanisettes, :nb_chantiers_actifs, :nb_anomalies,
             :score_transports, :score_transport_offre, :score_transport_intensite,
@@ -2340,6 +2484,7 @@ def upsert_quartier_kpis(engine, kpis_by_quartier: dict, annee: int):
             nb_t4plus              = EXCLUDED.nb_t4plus,
             score_qualite_vie      = EXCLUDED.score_qualite_vie,
             nb_espaces_verts       = EXCLUDED.nb_espaces_verts,
+            score_fraicheur_espaces_verts = EXCLUDED.score_fraicheur_espaces_verts,
             nb_arbres              = EXCLUDED.nb_arbres,
             score_air_no2          = EXCLUDED.score_air_no2,
             score_air_pm25         = EXCLUDED.score_air_pm25,
@@ -2395,7 +2540,7 @@ def upsert_iris_kpis(engine, kpis_by_iris: dict, annee: int):
             revenu_median_uc, taux_effort_achat,
             surface_mediane, nb_appartements, nb_maisons, pct_appartements,
             nb_t1, nb_t2, nb_t3, nb_t4plus,
-            score_qualite_vie, nb_espaces_verts, nb_arbres,
+            score_qualite_vie, nb_espaces_verts, score_fraicheur_espaces_verts, nb_arbres,
             score_air_no2, score_air_pm25, pct_fibre,
             nb_sanisettes, nb_chantiers_actifs, nb_anomalies,
             score_transports, score_transport_offre, score_transport_intensite,
@@ -2413,7 +2558,7 @@ def upsert_iris_kpis(engine, kpis_by_iris: dict, annee: int):
             :revenu_median_uc, :taux_effort_achat,
             :surface_mediane, :nb_appartements, :nb_maisons, :pct_appartements,
             :nb_t1, :nb_t2, :nb_t3, :nb_t4plus,
-            :score_qualite_vie, :nb_espaces_verts, :nb_arbres,
+            :score_qualite_vie, :nb_espaces_verts, :score_fraicheur_espaces_verts, :nb_arbres,
             :score_air_no2, :score_air_pm25, :pct_fibre,
             :nb_sanisettes, :nb_chantiers_actifs, :nb_anomalies,
             :score_transports, :score_transport_offre, :score_transport_intensite,
@@ -2448,6 +2593,7 @@ def upsert_iris_kpis(engine, kpis_by_iris: dict, annee: int):
             nb_t4plus               = EXCLUDED.nb_t4plus,
             score_qualite_vie       = EXCLUDED.score_qualite_vie,
             nb_espaces_verts        = EXCLUDED.nb_espaces_verts,
+            score_fraicheur_espaces_verts = EXCLUDED.score_fraicheur_espaces_verts,
             nb_arbres               = EXCLUDED.nb_arbres,
             score_air_no2           = EXCLUDED.score_air_no2,
             score_air_pm25          = EXCLUDED.score_air_pm25,
