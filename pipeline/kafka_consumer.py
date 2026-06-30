@@ -56,6 +56,16 @@ def _build_filter(record: dict, unique_key: str | None, key_bytes: bytes | None)
     return {"_fetched_at": record.get("_fetched_at")}
 
 
+def _enrich_velib(record: dict) -> dict:
+    """Déduit l'arrondissement depuis le stationcode (ex: '14111' → 14)."""
+    code = str(record.get("stationcode", ""))
+    if len(code) >= 2 and code[:2].isdigit():
+        arr = int(code[:2])
+        if 1 <= arr <= 20:
+            record["arrondissement"] = arr
+    return record
+
+
 def flush_batch(db, batch: dict[str, list[tuple]]) -> int:
     """Upsert un batch de messages par collection MongoDB. Retourne le total d'ops."""
     total = 0
@@ -69,6 +79,8 @@ def flush_batch(db, batch: dict[str, list[tuple]]) -> int:
             record["_dataset_id"] = msg["_dataset_id"]
             if key_bytes:
                 record["_kafka_key"] = key_bytes.decode("utf-8", errors="replace")
+            if collection_name == "velib":
+                record = _enrich_velib(record)
 
             unique_key = msg.get("_unique_key")
             filter_doc = _build_filter(record, unique_key, key_bytes)
