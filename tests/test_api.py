@@ -59,7 +59,6 @@ def test_login_success():
     assert isinstance(token, str)
     assert len(token) > 20
 
-
 # ─── Endpoints protégés ───────────────────────────────────────────────────────
 
 @pytest.fixture

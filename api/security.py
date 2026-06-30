@@ -8,6 +8,10 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
 from datetime import datetime, timedelta, timezone
+from slowapi import Limiter
+from slowapi.util import get_remote_address
+
+limiter = Limiter(key_func=get_remote_address, default_limits=["100/minute"])
 
 load_dotenv(Path(__file__).parent.parent / ".env")
 
