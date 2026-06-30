@@ -83,12 +83,7 @@ cp .env.example .env
 **Générer le hash du mot de passe API** (obligatoire — l'API refuse de démarrer sans ça) :
 
 ```bash
-python -c "
-import hashlib, os
-s = os.urandom(16).hex()
-h = hashlib.pbkdf2_hmac('sha256', b'VOTRE_MOT_DE_PASSE', s.encode(), 260000).hex()
-print(f'API_AUTH_PASSWORD_HASH=pbkdf2_sha256\$260000\${s}\${h}')
-"
+python -c "import hashlib, os; s = os.urandom(16).hex(); h = hashlib.pbkdf2_hmac('sha256', b'VOTRE_MOT_DE_PASSE', s.encode(), 260000).hex(); print(f'API_AUTH_PASSWORD_HASH=pbkdf2_sha256$260000${s}${h}')"
 # Copier la ligne entière dans .env
 ```
 
@@ -397,6 +392,7 @@ Pour le détail complet (qualité, colonnes clés, limites) : `docs/data_catalog
 |---|---|---|---|
 | GET | `/` | — | Accueil API |
 | GET | `/api/health` | — | Santé API |
+| GET | `/api/rate-limit` | — | Quota restant (100 req/min par IP) + secondes avant reset |
 | POST | `/api/auth/login` | — | Authentification → JWT |
 | GET | `/api/auth/me` | JWT | Vérification token |
 | GET | `/api/geo/arrondissements?annee=&indicateur=` | JWT | GeoJSON 20 arrondissements + KPIs |
@@ -448,7 +444,7 @@ pytest tests/ -v
 │   ├── database.py            # SQLAlchemy engine (PostgreSQL)
 │   ├── mongo.py               # Client MongoDB gold (read)
 │   ├── models.py              # Schémas Pydantic (KPIs + annee_* par section, GeoFeature…)
-│   ├── security.py            # JWT python-jose, PBKDF2, Bearer
+│   ├── security.py            # JWT python-jose, PBKDF2, Bearer, rate limiter (100 req/min)
 │   └── routers/               # auth, geo, kpis (fallback année), timeline, compare, streaming
 ├── tests/
 │   ├── test_pipeline.py       # Tests unitaires pipeline (20 tests)
