@@ -414,7 +414,7 @@ function setupLayers() {
     source: "quartiers",
     filter: ["==", "arrondissement", -1],
     paint: {
-      "line-color": "#111827",
+      "line-color": "#3b82f6",
       "line-width": 4,
       "line-opacity": 0,
     },
@@ -426,7 +426,7 @@ function setupLayers() {
     source: "quartiers",
     filter: ["==", "arrondissement", -1],
     paint: {
-      "line-color": "#dc2626",
+      "line-color": "#ec4899",
       "line-width": 4,
       "line-opacity": 0,
     },
@@ -438,7 +438,7 @@ function setupLayers() {
     source: "quartiers",
     filter: ["==", "quartier_id", ""],
     paint: {
-      "line-color": "#111827",
+      "line-color": "#3b82f6",
       "line-width": 5,
       "line-opacity": 0,
     },
@@ -450,7 +450,31 @@ function setupLayers() {
     source: "quartiers",
     filter: ["==", "quartier_id", ""],
     paint: {
-      "line-color": "#dc2626",
+      "line-color": "#ec4899",
+      "line-width": 5,
+      "line-opacity": 0,
+    },
+  });
+
+  map.addLayer({
+    id: "compare-iris1-border",
+    type: "line",
+    source: "quartiers",
+    filter: ["==", "iris_id", ""],
+    paint: {
+      "line-color": "#3b82f6",
+      "line-width": 5,
+      "line-opacity": 0,
+    },
+  });
+
+  map.addLayer({
+    id: "compare-iris2-border",
+    type: "line",
+    source: "quartiers",
+    filter: ["==", "iris_id", ""],
+    paint: {
+      "line-color": "#ec4899",
       "line-width": 5,
       "line-opacity": 0,
     },
@@ -731,6 +755,8 @@ export function setCompareHighlights({
   arr2 = null,
   quartier1 = null,
   quartier2 = null,
+  iris1 = null,
+  iris2 = null,
 } = {}) {
   if (!map) return;
 
@@ -738,15 +764,21 @@ export function setCompareHighlights({
   const hasArr2 = Number.isInteger(arr2) && arr2 > 0;
   const hasQuartier1 = typeof quartier1 === "string" && quartier1.length > 0;
   const hasQuartier2 = typeof quartier2 === "string" && quartier2.length > 0;
+  const hasIris1 = typeof iris1 === "string" && iris1.length > 0;
+  const hasIris2 = typeof iris2 === "string" && iris2.length > 0;
 
   map.setFilter("compare-arr1-border", ["==", "arrondissement", hasArr1 ? arr1 : -1]);
   map.setFilter("compare-arr2-border", ["==", "arrondissement", hasArr2 ? arr2 : -1]);
   map.setFilter("compare-quartier1-border", ["==", "quartier_id", hasQuartier1 ? quartier1 : ""]);
   map.setFilter("compare-quartier2-border", ["==", "quartier_id", hasQuartier2 ? quartier2 : ""]);
+  map.setFilter("compare-iris1-border", ["==", "iris_id", hasIris1 ? iris1 : ""]);
+  map.setFilter("compare-iris2-border", ["==", "iris_id", hasIris2 ? iris2 : ""]);
   map.setPaintProperty("compare-arr1-border", "line-opacity", getLineOpacity(hasArr1));
   map.setPaintProperty("compare-arr2-border", "line-opacity", getLineOpacity(hasArr2));
   map.setPaintProperty("compare-quartier1-border", "line-opacity", getLineOpacity(hasQuartier1));
   map.setPaintProperty("compare-quartier2-border", "line-opacity", getLineOpacity(hasQuartier2));
+  map.setPaintProperty("compare-iris1-border", "line-opacity", getLineOpacity(hasIris1));
+  map.setPaintProperty("compare-iris2-border", "line-opacity", getLineOpacity(hasIris2));
 }
 
 export function clearCompareHighlights() {

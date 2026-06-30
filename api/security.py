@@ -1,6 +1,9 @@
 import hashlib
 import hmac
 import os
+import threading
+import time
+from collections import defaultdict
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -8,6 +11,38 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
 from datetime import datetime, timedelta, timezone
+from slowapi import Limiter
+from slowapi.util import get_remote_address
+
+RATE_LIMIT = 100
+RATE_WINDOW = 60  # secondes
+
+limiter = Limiter(key_func=get_remote_address, default_limits=[f"{RATE_LIMIT}/minute"])
+
+
+class _RequestTracker:
+    def __init__(self):
+        self._hits: dict[str, list[float]] = defaultdict(list)
+        self._lock = threading.Lock()
+
+    def record(self, ip: str) -> None:
+        now = time.time()
+        with self._lock:
+            self._hits[ip].append(now)
+            cutoff = now - RATE_WINDOW
+            self._hits[ip] = [t for t in self._hits[ip] if t > cutoff]
+
+    def stats(self, ip: str) -> dict:
+        now = time.time()
+        with self._lock:
+            cutoff = now - RATE_WINDOW
+            hits = [t for t in self._hits.get(ip, []) if t > cutoff]
+        remaining = max(0, RATE_LIMIT - len(hits))
+        reset_in = int(RATE_WINDOW - (now - hits[0])) if hits else 0
+        return {"limit": RATE_LIMIT, "remaining": remaining, "reset_in_seconds": max(0, reset_in)}
+
+
+request_tracker = _RequestTracker()
 
 load_dotenv(Path(__file__).parent.parent / ".env")
 

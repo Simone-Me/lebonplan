@@ -4,6 +4,7 @@ import { setCompareHighlights } from "./map.js";
 
 let radarChart = null;
 let quartierOptionsCache = { year: null, byArr: new Map() };
+let irisOptionsCache = { year: null, byQuartier: new Map() };
 
 const ARRONDISSEMENTS = Array.from({ length: 20 }, (_, i) => i + 1);
 const LABELS = ["Qualité de vie", "Transports", "Loisirs", "Services publics", "Global"];
@@ -65,36 +66,117 @@ function populateQuartierSelect(selectId, arr, byArr) {
   sel.disabled = items.length === 0;
 }
 
+async function ensureIrisOptions(annee) {
+  if (irisOptionsCache.year === annee && irisOptionsCache.byQuartier.size) {
+    return irisOptionsCache.byQuartier;
+  }
+
+  const geojson = await fetchGeoJSON(annee, "score_global", "iris");
+  const byQuartier = new Map();
+
+  for (const feature of geojson.features ?? []) {
+    const qid = feature.properties?.quartier_id;
+    if (!qid) continue;
+    if (!byQuartier.has(qid)) byQuartier.set(qid, []);
+    byQuartier.get(qid).push({
+      iris_id: feature.properties?.iris_id,
+      iris_code: feature.properties?.iris_code,
+      nom: feature.properties?.nom,
+      quartier_id: qid,
+    });
+  }
+
+  for (const [, items] of byQuartier.entries()) {
+    items.sort((a, b) => (a.nom || "").localeCompare(b.nom || "", "fr", { numeric: true }));
+  }
+
+  irisOptionsCache = { year: annee, byQuartier };
+  return byQuartier;
+}
+
+function populateIrisSelect(selectId, quartierId, byQuartier) {
+  const sel = document.getElementById(selectId);
+  if (!sel) return;
+  const items = quartierId ? (byQuartier.get(quartierId) ?? []) : [];
+  const hasItems = items.length > 0;
+  sel.innerHTML = [
+    `<option value="">Tout le quartier</option>`,
+    ...items.map((item) => `<option value="${item.iris_id}">${item.nom}</option>`),
+  ].join("");
+  sel.disabled = !hasItems;
+  sel.classList.toggle("hidden", !quartierId);
+}
+
 function getSelectionState() {
   const arr1 = +document.getElementById("compare-arr1").value;
   const arr2 = +document.getElementById("compare-arr2").value;
   const quartier1 = document.getElementById("compare-quartier1").value || null;
   const quartier2 = document.getElementById("compare-quartier2").value || null;
+  const iris1 = document.getElementById("compare-iris1")?.value || null;
+  const iris2 = document.getElementById("compare-iris2")?.value || null;
 
-  return { arr1, arr2, quartier1, quartier2 };
+  return { arr1, arr2, quartier1, quartier2, iris1, iris2 };
 }
 
-function buildCompareContext(selection, byArr) {
-  const { arr1, arr2, quartier1, quartier2 } = selection;
+function buildCompareContext(selection, byArr, byQuartier = new Map()) {
+  const { arr1, arr2, quartier1, quartier2, iris1, iris2 } = selection;
   const hasQuartier1 = Boolean(quartier1);
   const hasQuartier2 = Boolean(quartier2);
+  const hasIris1 = Boolean(iris1);
+  const hasIris2 = Boolean(iris2);
 
-  if (hasQuartier1 !== hasQuartier2) {
+  if (hasIris1 !== hasIris2) {
+    throw new Error("Choisissez soit deux IRIS, soit deux zones de même niveau.");
+  }
+
+  if (!hasIris1 && hasQuartier1 !== hasQuartier2) {
     throw new Error("Choisissez soit deux arrondissements, soit deux quartiers administratifs.");
   }
 
-  if (!hasQuartier1 && arr1 === arr2) {
+  if (!hasQuartier1 && !hasIris1 && arr1 === arr2) {
     throw new Error("Choisissez deux arrondissements différents.");
   }
 
-  if (hasQuartier1 && quartier1 === quartier2) {
+  if (hasQuartier1 && !hasIris1 && quartier1 === quartier2) {
     throw new Error("Choisissez deux quartiers administratifs différents.");
   }
 
-  const mode = hasQuartier1 ? "quartier" : "arrondissement";
+  if (hasIris1 && iris1 === iris2) {
+    throw new Error("Choisissez deux IRIS différents.");
+  }
+
   const meta1 = (byArr.get(arr1) ?? []).find((item) => item.quartier_id === quartier1) ?? null;
   const meta2 = (byArr.get(arr2) ?? []).find((item) => item.quartier_id === quartier2) ?? null;
+  const irisMeta1 = hasIris1 ? (byQuartier.get(quartier1) ?? []).find((item) => item.iris_id === iris1) ?? null : null;
+  const irisMeta2 = hasIris2 ? (byQuartier.get(quartier2) ?? []).find((item) => item.iris_id === iris2) ?? null : null;
 
+  if (hasIris1) {
+    return {
+      mode: "iris",
+      left: {
+        type: "iris",
+        id: iris1,
+        label: irisMeta1?.nom || "IRIS",
+        sublabel: meta1?.nom ? `${meta1.nom} · ${formatArrLabel(arr1)}` : formatArrLabel(arr1),
+        arrondissement: arr1,
+        quartierId: quartier1,
+        irisId: iris1,
+        irisCode: irisMeta1?.iris_code || null,
+      },
+      right: {
+        type: "iris",
+        id: iris2,
+        label: irisMeta2?.nom || "IRIS",
+        sublabel: meta2?.nom ? `${meta2.nom} · ${formatArrLabel(arr2)}` : formatArrLabel(arr2),
+        arrondissement: arr2,
+        quartierId: quartier2,
+        irisId: iris2,
+        irisCode: irisMeta2?.iris_code || null,
+      },
+    };
+  }
+
+  const mode = hasQuartier1 ? "quartier" : "arrondissement";
   return {
     mode,
     left: hasQuartier1
@@ -144,6 +226,12 @@ function updateQuartierSelects(byArr) {
   populateQuartierSelect("compare-quartier2", arr2, byArr);
 }
 
+async function updateIrisSelects(byQuartier) {
+  const { quartier1, quartier2 } = getSelectionState();
+  populateIrisSelect("compare-iris1", quartier1, byQuartier);
+  populateIrisSelect("compare-iris2", quartier2, byQuartier);
+}
+
 function syncQuartierSelects(byArr, previousSelection) {
   const quartier1Sel = document.getElementById("compare-quartier1");
   const quartier2Sel = document.getElementById("compare-quartier2");
@@ -156,7 +244,19 @@ async function loadComparisonOptions(annee) {
   const previousSelection = getSelectionState();
   const byArr = await ensureQuartierOptions(annee);
   syncQuartierSelects(byArr, previousSelection);
-  return byArr;
+
+  const byQuartier = await ensureIrisOptions(annee);
+  await updateIrisSelects(byQuartier);
+  if (previousSelection?.iris1) {
+    const el = document.getElementById("compare-iris1");
+    if (el) { el.value = previousSelection.iris1; el.classList.remove("hidden"); }
+  }
+  if (previousSelection?.iris2) {
+    const el = document.getElementById("compare-iris2");
+    if (el) { el.value = previousSelection.iris2; el.classList.remove("hidden"); }
+  }
+
+  return { byArr, byQuartier };
 }
 
 async function fetchComparisonData(context, annee) {
@@ -168,9 +268,17 @@ async function fetchComparisonData(context, annee) {
     };
   }
 
+  if (context.mode === "iris") {
+    const [left, right] = await Promise.all([
+      fetchKPIs(context.left.id, annee, "iris"),
+      fetchKPIs(context.right.id, annee, "iris"),
+    ]);
+    return { left, right };
+  }
+
   const [left, right] = await Promise.all([
-    fetchKPIs(context.left.id, annee),
-    fetchKPIs(context.right.id, annee),
+    fetchKPIs(context.left.id, annee, "quartier"),
+    fetchKPIs(context.right.id, annee, "quartier"),
   ]);
   return { left, right };
 }
@@ -189,17 +297,17 @@ function renderRadar(data, context) {
         {
           label: context.left.label,
           data: scores1,
-          borderColor: "#6366f1",
-          backgroundColor: "rgba(99,102,241,0.18)",
-          pointBackgroundColor: "#6366f1",
+          borderColor: "#3b82f6",
+          backgroundColor: "rgba(59,130,246,0.18)",
+          pointBackgroundColor: "#3b82f6",
           borderWidth: 2,
         },
         {
           label: context.right.label,
           data: scores2,
-          borderColor: "#3b82f6",
-          backgroundColor: "rgba(59,130,246,0.14)",
-          pointBackgroundColor: "#3b82f6",
+          borderColor: "#ec4899",
+          backgroundColor: "rgba(236,72,153,0.14)",
+          pointBackgroundColor: "#ec4899",
           borderWidth: 2,
         },
       ],
@@ -293,19 +401,33 @@ function renderTable(data, context) {
 
 function renderSelectionDetails(context) {
   const content = document.getElementById("compare-quartiers-content");
+  const leftSub = context.left.sublabel
+    + (context.left.quartierCode ? ` · #${context.left.quartierCode}` : "")
+    + (context.left.irisCode ? ` · IRIS ${context.left.irisCode}` : "");
+  const rightSub = context.right.sublabel
+    + (context.right.quartierCode ? ` · #${context.right.quartierCode}` : "")
+    + (context.right.irisCode ? ` · IRIS ${context.right.irisCode}` : "");
   content.innerHTML = `
     <div class="compare-quartier-group arr1">
       <h3>${context.left.label}</h3>
-      <p>${context.left.sublabel}${context.left.quartierCode ? ` · #${context.left.quartierCode}` : ""}</p>
+      <p>${leftSub}</p>
     </div>
     <div class="compare-quartier-group arr2">
       <h3>${context.right.label}</h3>
-      <p>${context.right.sublabel}${context.right.quartierCode ? ` · #${context.right.quartierCode}` : ""}</p>
+      <p>${rightSub}</p>
     </div>
   `;
 }
 
 function applyCompareHighlights(context) {
+  if (context.mode === "iris") {
+    setCompareHighlights({
+      iris1: context.left.irisId,
+      iris2: context.right.irisId,
+    });
+    return;
+  }
+
   if (context.mode === "quartier") {
     setCompareHighlights({
       quartier1: context.left.quartierId,
@@ -327,16 +449,25 @@ export function initCompare(anneeGetter, clearCompareHighlights) {
   const goBtn = document.getElementById("compare-go");
   const arr1Sel = document.getElementById("compare-arr1");
   const arr2Sel = document.getElementById("compare-arr2");
+  const quartier1Sel = document.getElementById("compare-quartier1");
+  const quartier2Sel = document.getElementById("compare-quartier2");
 
   populateArrondissementSelects();
 
-  const refreshQuartierOptions = async () => {
+  const refreshOptions = async () => {
     try {
       await loadComparisonOptions(anneeGetter());
     } catch (error) {
       document.getElementById("compare-table").innerHTML =
         `<p class="error">Erreur : ${error.message}</p>`;
     }
+  };
+
+  const refreshIrisOnly = async () => {
+    try {
+      const byQuartier = await ensureIrisOptions(anneeGetter());
+      await updateIrisSelects(byQuartier);
+    } catch (_) {}
   };
 
   btn.addEventListener("click", async () => {
@@ -346,7 +477,7 @@ export function initCompare(anneeGetter, clearCompareHighlights) {
       clearCompareHighlights?.();
       return;
     }
-    await refreshQuartierOptions();
+    await refreshOptions();
   });
 
   close.addEventListener("click", () => {
@@ -354,13 +485,15 @@ export function initCompare(anneeGetter, clearCompareHighlights) {
     clearCompareHighlights?.();
   });
 
-  arr1Sel.addEventListener("change", refreshQuartierOptions);
-  arr2Sel.addEventListener("change", refreshQuartierOptions);
+  arr1Sel.addEventListener("change", refreshOptions);
+  arr2Sel.addEventListener("change", refreshOptions);
+  quartier1Sel?.addEventListener("change", refreshIrisOnly);
+  quartier2Sel?.addEventListener("change", refreshIrisOnly);
 
   goBtn.addEventListener("click", async () => {
     try {
-      const byArr = await loadComparisonOptions(anneeGetter());
-      const context = buildCompareContext(getSelectionState(), byArr);
+      const { byArr, byQuartier } = await loadComparisonOptions(anneeGetter());
+      const context = buildCompareContext(getSelectionState(), byArr, byQuartier);
       const data = await fetchComparisonData(context, anneeGetter());
       applyCompareHighlights(context);
       renderSummary(data, context);
@@ -374,5 +507,5 @@ export function initCompare(anneeGetter, clearCompareHighlights) {
     }
   });
 
-  refreshQuartierOptions();
+  refreshOptions();
 }

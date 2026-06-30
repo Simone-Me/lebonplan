@@ -240,6 +240,15 @@
     <main id="map-area" aria-label="Carte de Paris">
       <div id="map"></div>
 
+      <!-- Bouton reset sélection -->
+      <button type="button" id="selection-reset-btn" class="selection-reset-btn hidden" aria-label="Désélectionner la zone">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" width="11" height="11" aria-hidden="true">
+          <line x1="18" y1="6" x2="6" y2="18"></line>
+          <line x1="6" y1="6" x2="18" y2="18"></line>
+        </svg>
+        Désélectionner
+      </button>
+
       <!-- Classement Top 5 / Flop 5 -->
       <div id="ranking-panel" class="ranking-panel" role="complementary" aria-label="Classement des zones">
         <div class="ranking-header">
@@ -280,11 +289,13 @@
       <div class="compare-side">
         <select id="compare-arr1" title="Premier arrondissement" aria-label="Premier arrondissement à comparer"></select>
         <select id="compare-quartier1" title="Premier quartier administratif" aria-label="Premier quartier à comparer"></select>
+        <select id="compare-iris1" title="Premier IRIS" aria-label="Premier IRIS à comparer" class="hidden"></select>
       </div>
       <span class="vs-badge" aria-hidden="true">vs</span>
       <div class="compare-side">
         <select id="compare-arr2" title="Deuxième arrondissement" aria-label="Deuxième arrondissement à comparer"></select>
         <select id="compare-quartier2" title="Deuxième quartier administratif" aria-label="Deuxième quartier à comparer"></select>
+        <select id="compare-iris2" title="Deuxième IRIS" aria-label="Deuxième IRIS à comparer" class="hidden"></select>
       </div>
       <button type="button" id="compare-go" class="btn-primary">Comparer</button>
     </div>

@@ -13,9 +13,13 @@ from fastapi import FastAPI, Request, Response
 from fastapi import Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
+from slowapi.util import get_remote_address
 
 from api.routers import auth, geo, kpis, timeline, compare, streaming
-from api.security import get_cors_origins, require_auth
+from api.security import get_cors_origins, limiter, request_tracker, require_auth
 
 app = FastAPI(
     title="Urban Data Explorer API",
@@ -23,12 +27,21 @@ app = FastAPI(
     version="0.4.0",
 )
 
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+app.add_middleware(SlowAPIMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=get_cors_origins(),
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
+
+@app.middleware("http")
+async def track_requests(request: Request, call_next):
+    request_tracker.record(get_remote_address(request))
+    return await call_next(request)
+
 
 app.include_router(auth.router,     prefix="/api")
 app.include_router(geo.router,      prefix="/api", tags=["Géo"], dependencies=[Depends(require_auth)])
@@ -65,3 +78,8 @@ async def global_exception_handler(request: Request, exc: Exception):
 @app.get("/api/health", tags=["Santé"])
 def health():
     return {"status": "ok"}
+
+
+@app.get("/api/rate-limit", tags=["Santé"])
+def rate_limit_status(request: Request):
+    return request_tracker.stats(get_remote_address(request))
