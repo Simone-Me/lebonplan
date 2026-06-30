@@ -134,6 +134,7 @@ async function setCurrentLevel(level, { force = false } = {}) {
   if (!force && level === currentLevel) return;
   currentLevel = level;
   currentAreaSelection = null;
+  setSelectionResetVisible(false);
   setActiveLevelButton(level);
   clearCompareHighlights();
   clearAreaSelection();
@@ -446,6 +447,10 @@ function initZoneSearch() {
   window.addEventListener("lebonplan:level-changed", renderResults);
 }
 
+function setSelectionResetVisible(visible) {
+  document.getElementById("selection-reset-btn")?.classList.toggle("hidden", !visible);
+}
+
 function selectZoneFeature(feature) {
   const props = feature.properties || {};
   const idField = currentLevel === "arrondissement"
@@ -464,6 +469,7 @@ function selectZoneFeature(feature) {
   };
 
   currentAreaSelection = areaSelection;
+  setSelectionResetVisible(true);
   syncSelectionFromArea(areaSelection);
   openSidebar(areaSelection, currentAnnee, getIndicatorScale, currentLevel);
   flyToZone(feature);
@@ -548,7 +554,21 @@ function init() {
   setActiveLevelButton(currentLevel);
   initMap((areaSelection) => {
     const selectionLevel = areaSelection?.level || currentLevel;
+    const isSameZone = currentAreaSelection
+      && currentAreaSelection.area_id != null
+      && String(currentAreaSelection.area_id) === String(areaSelection?.area_id)
+      && currentAreaSelection.level === selectionLevel;
+
+    if (isSameZone) {
+      currentAreaSelection = null;
+      setSelectionResetVisible(false);
+      clearAreaSelection();
+      closeSidebar();
+      return;
+    }
+
     currentAreaSelection = { ...areaSelection, level: selectionLevel };
+    setSelectionResetVisible(true);
     openSidebar(areaSelection, currentAnnee, getIndicatorScale, selectionLevel);
   }, { dark: false });
   setMapLevelSyncHandler((nextLevel) => {
@@ -607,6 +627,13 @@ function init() {
 
   document.querySelectorAll(".point-layer-toggle").forEach((cb) => {
     cb.addEventListener("change", () => togglePointLayer(cb.dataset.type, cb.checked));
+  });
+
+  document.getElementById("selection-reset-btn")?.addEventListener("click", () => {
+    currentAreaSelection = null;
+    setSelectionResetVisible(false);
+    clearAreaSelection();
+    closeSidebar();
   });
 
   initAuth(() => {

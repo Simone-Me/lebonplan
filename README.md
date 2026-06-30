@@ -465,6 +465,8 @@ pytest tests/ -v
 ├── docker-compose.yml         # MinIO + MongoDB + PostgreSQL + API + Scheduler batch
 ├── Dockerfile.api
 ├── Dockerfile.scheduler
+├── run_pipeline.bat           # Lance le pipeline complet via Docker (Bronze→Silver→Gold) + logs datés
+├── setup_task_scheduler.ps1   # Enregistre run_pipeline.bat dans le Planificateur de tâches Windows
 ├── requirements.txt
 ├── pytest.ini
 └── .env.example
@@ -486,9 +488,82 @@ pytest tests/ -v
 - Cinémas (rose)
 - Bibliothèques (teal)
 
-**Comparaison** : arrondissement vs arrondissement, ou quartier vs quartier (radar + tableau).
+**Sélection de zone** : cliquer sur une zone ouvre le panneau latéral. Recliquer sur la même zone la désélectionne. Un bouton **"Désélectionner"** flottant (bas-gauche de la carte) apparaît dès qu'une zone est active et permet de réinitialiser la sélection sans changer de niveau.
+
+**Comparaison** : arrondissement vs arrondissement, quartier vs quartier, ou **IRIS vs IRIS** (sélection en cascade : arrondissement → quartier → IRIS). Couleurs distinctives : bleu `#3b82f6` pour la zone gauche, rose `#ec4899` pour la zone droite — appliqués sur le graphique radar, les cartes de score et les bordures sur la carte.
 
 Pour la logique détaillée : `docs/carte-detaillee-paris.md`
+
+---
+
+## Automatisation du pipeline (Windows)
+
+Deux fichiers permettent de lancer le pipeline automatiquement chaque matin sans intervention manuelle.
+
+### `run_pipeline.bat` — le script de lancement
+
+Ce fichier Windows Batch effectue les opérations suivantes dans l'ordre :
+
+```
+1. Vérifie que Docker Desktop est en cours d'exécution
+      └─ Si non : tente de le démarrer, attend 60 secondes, re-vérifie
+      └─ Si toujours absent : abandon avec code d'erreur 1
+
+2. Démarre uniquement les services d'infrastructure (sans les recréer s'ils tournent déjà)
+      docker compose up -d minio mongodb postgres kafka
+      └─ Attend 30 secondes que les healthchecks passent
+
+3. Lance le pipeline complet via un conteneur temporaire (--rm = supprimé après)
+      docker compose run --rm scheduler \
+        python -c "bronze.run(); silver.run(); gold.run()"
+      └─ Exécute Bronze → Silver → Gold dans le même environnement que le scheduler Docker
+
+4. Écrit un fichier de log daté dans logs/pipeline_YYYYMMDD_HHmm.log
+      └─ Chaque exécution = un fichier distinct (pas d'écrasement)
+
+5. Retourne le code de sortie de Docker (0 = succès, 1 = erreur)
+      └─ Exploitable par le Planificateur de tâches pour alerter en cas d'échec
+```
+
+> **Pourquoi `docker compose run --rm` et pas `exec` ?**  
+> `run` crée un conteneur jetable avec les mêmes variables d'environnement que le service `scheduler` défini dans `docker-compose.yml` (credentials MinIO, MongoDB, PostgreSQL injectés automatiquement). `exec` nécessiterait que le scheduler soit déjà démarré. Le `--rm` évite l'accumulation de conteneurs arrêtés.
+
+**Lancement manuel :**
+
+```bat
+run_pipeline.bat
+```
+
+Les logs s'accumulent dans `logs/` à la racine du projet.
+
+---
+
+### `setup_task_scheduler.ps1` — enregistrement Windows Task Scheduler
+
+Ce script PowerShell enregistre `run_pipeline.bat` dans le **Planificateur de tâches Windows** pour une exécution automatique quotidienne.
+
+**Prérequis :** lancer PowerShell **en tant qu'administrateur**.
+
+```powershell
+# Autoriser l'exécution du script (session uniquement)
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+
+# Enregistrer la tâche à 07h00 chaque matin (défaut)
+.\setup_task_scheduler.ps1
+
+# Changer l'heure de déclenchement
+.\setup_task_scheduler.ps1 -RunAt "06:30"
+
+# Supprimer la tâche
+Unregister-ScheduledTask -TaskName "LeBonPlan_Pipeline_Morning"
+```
+
+La tâche est configurée avec :
+- `StartWhenAvailable` : si le PC était éteint à l'heure prévue, la tâche s'exécute au prochain démarrage
+- `RunLevel Highest` : droits élevés pour que Docker soit accessible
+- Timeout 2 heures : abandon automatique si le pipeline dépasse ce délai
+
+> **Note :** le scheduler Docker (`PIPELINE_CRON=0 2 * * *`) continue de tourner indépendamment à 2h du matin **à l'intérieur** de Docker. Le `.bat` est complémentaire — il permet de déclencher le pipeline à l'heure souhaitée depuis Windows, même si Docker était arrêté.
 
 ---
 
@@ -503,7 +578,8 @@ Pour la logique détaillée : `docs/carte-detaillee-paris.md`
 | `v0.5.0` | Kafka streaming (vélib/sanisettes/chantiers/anomalies), PBKDF2 sécurité, tests API, data catalog, perf report |
 | `v0.6.0` | Architecture médaillon stricte : Silver = MinIO Parquet only → MongoDB déplacé en Gold (Phase 1 silver→mongo, Phase 2 mongo→postgres). Kafka étendu à 5 datasets + Voies 100k. Ingestion idempotente Bronze + Silver. PIP vectorisé geopandas.sjoin (20–50× plus rapide). |
 | `v0.7.0` | Badges année par section (fallback API si NULL) + countdown temps réel Kafka dans le dashboard. Endpoint `/api/streaming/status`. |
-| **`v0.8.0`** | **Score de fraîcheur détaillé par espace vert (`score_fraicheur_espaces_verts`) : palier végétation haute, ouverture 24h/24, bonus amplitude horaire — remplace le simple comptage dans `score_qualite_vie` aux 3 granularités (arrondissement/quartier/IRIS). Silver conserve `proportion_vegetation_haute`, `p_vegetation_h`, `horaires_*`.** |
+| `v0.8.0` | Score de fraîcheur détaillé par espace vert (`score_fraicheur_espaces_verts`) : palier végétation haute, ouverture 24h/24, bonus amplitude horaire — remplace le simple comptage dans `score_qualite_vie` aux 3 granularités (arrondissement/quartier/IRIS). Silver conserve `proportion_vegetation_haute`, `p_vegetation_h`, `horaires_*`. |
+| **`v0.9.0`** | **Dashboard : bouton "Désélectionner" flottant sur la carte + désélection au second clic sur la même zone. Comparaison étendue au niveau IRIS (cascade arrondissement → quartier → IRIS, tri numérique). Couleurs comparaison unifiées bleu/rose sur radar, cartes de score et bordures carte. Automatisation Windows : `run_pipeline.bat` (Bronze → Silver → Gold via Docker) + `setup_task_scheduler.ps1` (Planificateur de tâches, 7h par défaut, logs datés dans `logs/`).** |
 
 ---
 
